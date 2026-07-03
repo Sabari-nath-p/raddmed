@@ -1,0 +1,333 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:flutter_libserialport/flutter_libserialport.dart';
+
+/// Singleton service that manages serial port communication with the
+/// RAADMED ablation device.
+///
+/// ## Protocol Reference
+/// ### Outgoing (App → Device)
+/// | Cmd  | Format       | Description                          |
+/// |------|--------------|--------------------------------------|
+/// | 11   | `11\n`       | Start procedure                      |
+/// | 12   | `12{VAL}\n`  | Set power (e.g. `1275` = 75 W)       |
+/// | 13   | `13{VAL}\n`  | Set timer (e.g. `13300` = 300 s)     |
+/// | 14   | `1401\n`     | Pump ON                              |
+/// |      | `1400\n`     | Pump OFF                             |
+/// | 15   | `1500\n`     | Oven OFF (Continuous)                |
+/// |      | `1501\n`     | Oven ON  (Continuous)                |
+/// | 16   | `1600\n`     | Oven OFF (Footswitch/Endovorus)      |
+/// |      | `1601\n`     | Oven ON  (Footswitch/Endovorus)      |
+/// | 17   | `17{VAL}\n`  | Set pump flow rate (Endovorus)       |
+/// | 18   | `18{VAL}\n`  | Set infusion flow rate               |
+///
+/// ### Incoming (Device → App)
+/// | Cmd  | Format       | Description                          |
+/// |------|--------------|--------------------------------------|
+/// | 22   | `22{DATA}\n` | Shaft temperature (×10, e.g. 370=37.0°C) |
+/// | 23   | `23{DATA}\n` | Edge temperature  (×10)              |
+/// | 24   | `24{DATA}\n` | Power           (×10)              |
+/// | 25   | `25\n`       | Footswitch activated                 |
+class SerialService {
+  // ── Singleton ──────────────────────────────────────────────────────────────
+  SerialService._();
+  static final SerialService instance = SerialService._();
+
+  // ── Port state ─────────────────────────────────────────────────────────────
+  SerialPort? _port;
+  SerialPortReader? _reader;
+  StreamSubscription<Uint8List>? _readerSub;
+  String? _connectedPortName;
+  final StringBuffer _buffer = StringBuffer();
+
+  // ── Public state ───────────────────────────────────────────────────────────
+  bool get isConnected => _port?.isOpen ?? false;
+  String? get connectedPort => _connectedPortName;
+
+  // ── Streams ────────────────────────────────────────────────────────────────
+  final _statusCtrl = StreamController<SerialConnectionStatus>.broadcast();
+  Stream<SerialConnectionStatus> get statusStream => _statusCtrl.stream;
+
+  final _dataCtrl = StreamController<SerialCommand>.broadcast();
+  Stream<SerialCommand> get dataStream => _dataCtrl.stream;
+
+  // ── Configuration ──────────────────────────────────────────────────────────
+  int baudRate = 115200;
+
+  // ── Port Discovery ─────────────────────────────────────────────────────────
+  /// Returns all serial + PTY ports available on this machine.
+  ///
+  /// `flutter_libserialport` (via `libserialport`) only enumerates real
+  /// hardware ports through the OS device manager (IOKit on macOS, udev on
+  /// Linux). It intentionally skips pseudo-terminal (PTY) devices such as
+  /// `/dev/ttys*`, `/dev/ptyp*`, etc., which are commonly used by serial
+  /// simulators, virtual COM tools, and socat tunnels.
+  ///
+  /// This override merges both lists so that PTY ports appear in the dropdown.
+  List<String> get availablePorts {
+    final hw = SerialPort.availablePorts; // hardware / USB-serial / BT-serial
+    // final pty = _scanPtyDevices();
+    // Merge, preserving order: hardware first, then PTY-only entries.
+    return [...hw]; //...pty.where((p) => !hw.contains(p))];
+  }
+
+  /// Scans `/dev/` for pseudo-terminal and software-serial devices.
+  /// On macOS the relevant patterns are:
+  ///   - `/dev/ttys*`   – slave PTYs (socat, screen, minicom targets)
+  ///   - `/dev/ptyp*`   – BSD-style master PTYs
+  ///   - `/dev/tty.*`   – macOS IOKit cu/tty pairs (already in hw list but
+  ///                       caught here as fallback)
+
+  /// Returns a user-friendly map of port name → description.
+
+  // ── Connect ────────────────────────────────────────────────────────────────
+
+  /// Returns true when [portName] is a pseudo-terminal device.
+  /// PTY slaves cannot accept hardware serial port configuration (baud rate
+  /// via IOKit, flow control, etc.) — applying it causes SP_ERR_FAIL (code 2).
+
+  /// Opens the given serial port for read/write communication.
+  bool connect(String portName) {
+    disconnect(); // Clean up any existing connection
+
+    try {
+      _port = SerialPort(portName);
+
+      // Open first — libserialport validates the path at this point.
+      // For PTY devices we MUST open before calling config, otherwise the
+      // library tries to query IOKit for a device that doesn't exist in the
+      // hardware registry and returns SP_ERR_FAIL (error code 2 = ENOENT).
+      if (!_port!.openReadWrite()) {
+        final err = SerialPort.lastError;
+
+        _statusCtrl.add(
+          SerialConnectionStatus(
+            connected: false,
+            portName: portName,
+            error: 'Failed to open port: $err',
+          ),
+        );
+        _port!.dispose();
+        _port = null;
+        return false;
+      }
+
+      // Apply serial configuration only for real hardware ports.
+      // Pseudo-terminal devices don't support IOKit-based baud rate config;
+      // they inherit whatever the master side sets.
+
+      _connectedPortName = portName;
+
+      // Start listening
+      _reader = SerialPortReader(_port!, timeout: 100);
+      _readerSub = _reader!.stream.listen(
+        _onData,
+        onError: (e) {
+          _statusCtrl.add(
+            SerialConnectionStatus(
+              connected: false,
+              portName: portName,
+              error: 'Read error: $e',
+            ),
+          );
+        },
+        cancelOnError: false,
+      );
+
+      _statusCtrl.add(
+        SerialConnectionStatus(connected: true, portName: portName),
+      );
+      return true;
+    } catch (e) {
+      _statusCtrl.add(
+        SerialConnectionStatus(
+          connected: false,
+          portName: portName,
+          error: 'Connection error: $e',
+        ),
+      );
+      _port?.dispose();
+      _port = null;
+      return false;
+    }
+  }
+
+  // ── Disconnect ─────────────────────────────────────────────────────────────
+  void disconnect() {
+    _readerSub?.cancel();
+    _readerSub = null;
+    _reader = null;
+    _buffer.clear();
+
+    if (_port != null) {
+      if (_port!.isOpen) _port!.close();
+      _port!.dispose();
+      _port = null;
+    }
+
+    if (_connectedPortName != null) {
+      _statusCtrl.add(
+        SerialConnectionStatus(connected: false, portName: _connectedPortName),
+      );
+      _connectedPortName = null;
+    }
+  }
+
+  // ── Send Command ───────────────────────────────────────────────────────────
+  /// Sends a command string to the device. Appends `\n` terminator.
+  bool send(String command) {
+    print('Serial Send: $command'); // Show in debug console
+    if (_port == null || !_port!.isOpen) return false;
+    try {
+      final bytes = Uint8List.fromList('$command\n'.codeUnits);
+      _port!.write(bytes);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ── Convenience Senders ────────────────────────────────────────────────────
+
+  /// Send `11` — start procedure
+  bool sendStartProcedure() => send('11');
+
+  /// Send `12{value}` — set power in watts
+  bool sendPower(int watts) => send('12$watts');
+
+  /// Send `13{value}` — set timer in seconds
+  bool sendTimer(int seconds) => send('13$seconds');
+
+  /// Send `1401` / `1400` — pump ON / OFF
+  bool sendPump(bool on) => send(on ? '1401' : '1400');
+
+  /// Send `1501` / `1500` — oven ON/OFF in Continuous mode
+  bool sendOvenContinuous(bool on) => send(on ? '1501' : '1500');
+
+  /// Send `1601` / `1600` — oven ON/OFF in Footswitch/Endovorus mode
+  bool sendOvenFootswitch(bool on) => send(on ? '1601' : '1600');
+
+  /// Send `17{value}` — set pump flow rate in Endovorus mode
+  bool sendPumpFlowRate(int rate) => send('17$rate');
+
+  /// Send `18{value}` — set infusion flow rate
+  bool sendInfusionFlowRate(int rate) => send('18$rate');
+
+  // ── Incoming Data Parser ───────────────────────────────────────────────────
+  void _onData(Uint8List data) {
+    final chunk = String.fromCharCodes(data);
+    _buffer.write(chunk);
+
+    // Process complete lines (newline-terminated)
+    while (true) {
+      final content = _buffer.toString();
+      final nlIdx = content.indexOf('\n');
+      if (nlIdx == -1) break;
+
+      final line = content.substring(0, nlIdx).trim();
+      _buffer.clear();
+      _buffer.write(content.substring(nlIdx + 1));
+
+      if (line.isEmpty) continue;
+      _parseLine(line);
+    }
+  }
+
+  void _parseLine(String line) {
+    // Command 25 — footswitch (exact match, no data payload)
+    print(line);
+
+    if (line == '25') {
+      _dataCtrl.add(
+        const SerialCommand(type: SerialCommandType.footswitch, value: 1.0),
+      );
+      return;
+    }
+
+    // Commands 22xx, 23xx, 24xx — sensor data
+    if (line.length >= 3) {
+      final prefix = line.substring(0, 2);
+      final dataStr = line.substring(2);
+      final rawVal = int.tryParse(dataStr);
+
+      if (rawVal != null) {
+        switch (prefix) {
+          case '22':
+            _dataCtrl.add(
+              SerialCommand(
+                type: SerialCommandType.shaftTemp,
+                value: rawVal / 10.0,
+              ),
+            );
+            return;
+          case '23':
+            _dataCtrl.add(
+              SerialCommand(
+                type: SerialCommandType.edgeTemp,
+                value: rawVal / 10.0,
+              ),
+            );
+            return;
+          case '24':
+            _dataCtrl.add(
+              SerialCommand(
+                type: SerialCommandType.voltage,
+                value: rawVal / 10.0,
+              ),
+            );
+            return;
+        }
+      }
+    }
+
+    // Unknown command — emit as raw for debugging
+    _dataCtrl.add(
+      SerialCommand(type: SerialCommandType.unknown, value: 0, raw: line),
+    );
+  }
+
+  // ── Cleanup ────────────────────────────────────────────────────────────────
+  void dispose() {
+    disconnect();
+    _statusCtrl.close();
+    _dataCtrl.close();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Data Models
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The type of data received from the device.
+enum SerialCommandType {
+  shaftTemp, // 22
+  edgeTemp, // 23
+  voltage, // 24
+  footswitch, // 25
+  unknown,
+}
+
+/// A parsed incoming command from the device.
+class SerialCommand {
+  final SerialCommandType type;
+  final double value;
+  final String? raw;
+  const SerialCommand({required this.type, required this.value, this.raw});
+
+  @override
+  String toString() =>
+      'SerialCommand($type, $value${raw != null ? ', raw=$raw' : ''})';
+}
+
+/// Connection status event.
+class SerialConnectionStatus {
+  final bool connected;
+  final String? portName;
+  final String? error;
+  const SerialConnectionStatus({
+    required this.connected,
+    this.portName,
+    this.error,
+  });
+}

@@ -1,0 +1,48 @@
+name: raddmed
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.11.1
+
+dependencies:
+  excel: ^4.0.6
+  file_selector: ^1.1.0
+  flutter:
+    sdk: flutter
+  flutter_libserialport: ^0.6.0
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
+  intl: ^0.20.3
+  path_provider: ^2.1.6
+  pdf: ^3.12.0
+  printing: ^5.14.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  hive_generator: ^2.0.1
+  build_runner: ^2.4.13
+  flutter_launcher_icons: ^0.13.1
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: false
+  web:
+    generate: true
+    image_path: "Assets/logo.png"
+  windows:
+    generate: true
+    image_path: "Assets/logo.png"
+  image_path: "Assets/logo.png"
+  macos:
+    generate: true
+    image_path: "Assets/logo.png"
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - Assets/
