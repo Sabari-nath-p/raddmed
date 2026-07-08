@@ -538,7 +538,8 @@ class _ProcedureHistoryScreenState extends State<ProcedureHistoryScreen> {
     String cycleCount = p.numberCycle ?? '—';
 
     // Pump rate is only meaningful in Endovorus mode
-    final isEndoMode = p.mode.toLowerCase() == 'endovorus' ||
+    final isEndoMode =
+        p.mode.toLowerCase() == 'endovorus' ||
         p.mode.toLowerCase() == 'endovascular';
 
     if (p.procedureLog != null && p.procedureLog!.isNotEmpty) {
@@ -1207,7 +1208,8 @@ class ProcedureDetailScreen extends StatelessWidget {
 
     // Parse settings from log
     // Pump rate only populated for Endovorus/Endovascular mode
-    final isEndoMode = procedure.mode.toLowerCase() == 'endovorus' ||
+    final isEndoMode =
+        procedure.mode.toLowerCase() == 'endovorus' ||
         procedure.mode.toLowerCase() == 'endovascular';
     String powerSet = '—', timerSet = '—', pumpRate = '—';
     String cycleCount = procedure.numberCycle ?? '—';
@@ -1455,7 +1457,9 @@ class ProcedureDetailScreen extends StatelessWidget {
                 const Spacer(),
                 // Print Report button
                 GestureDetector(
-                  onTap: () => PdfReportService.generateAndPrintProcedureReport(procedure),
+                  onTap: () => PdfReportService.generateAndPrintProcedureReport(
+                    procedure,
+                  ),
                   child: Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 18,

@@ -681,13 +681,13 @@ class _InfusionDialog extends StatefulWidget {
 
 class _InfusionDialogState extends State<_InfusionDialog> {
   final _serial = SerialService.instance;
-  int _flowRate = 5; // 0–15 m/s
+  int _flowRate = 5; // 0–250 L/min
   bool _isRunning = false;
 
   void _toggleInfusion() {
     setState(() => _isRunning = !_isRunning);
     if (_isRunning) {
-      _serial.sendInfusionFlowRate(_flowRate); // ensure flow rate is set before starting
+      _serial.sendInfusionFlowRate(_flowRate.toDouble()); // ensure flow rate is set before starting
       _serial.sendPump(true);
     } else {
       _serial.sendPump(false);
@@ -863,7 +863,7 @@ class _InfusionDialogState extends State<_InfusionDialog> {
                         const Padding(
                           padding: EdgeInsets.only(bottom: 10),
                           child: Text(
-                            'm/s',
+                            'L/min',
                             style: TextStyle(
                               fontSize: 22,
                               fontWeight: FontWeight.w600,
@@ -886,7 +886,7 @@ class _InfusionDialogState extends State<_InfusionDialog> {
                           onTap: _flowRate > 0
                               ? () {
                                   setState(() => _flowRate--);
-                                  _serial.sendInfusionFlowRate(_flowRate);
+                                  _serial.sendInfusionFlowRate(_flowRate.toDouble());
                                 }
                               : null,
                           child: AnimatedContainer(
@@ -914,7 +914,7 @@ class _InfusionDialogState extends State<_InfusionDialog> {
                       const SizedBox(width: 12),
                       // Range label
                       Text(
-                        '0 – 15 m/s',
+                        '0 – 250 L/min',
                         style: TextStyle(
                           fontSize: 12,
                           color: subText,
@@ -925,22 +925,22 @@ class _InfusionDialogState extends State<_InfusionDialog> {
                       // Plus
                       Expanded(
                         child: GestureDetector(
-                          onTap: _flowRate < 15
+                          onTap: _flowRate < 250
                               ? () {
                                   setState(() => _flowRate++);
-                                  _serial.sendInfusionFlowRate(_flowRate);
+                                  _serial.sendInfusionFlowRate(_flowRate.toDouble());
                                 }
                               : null,
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 150),
                             height: 56,
                             decoration: BoxDecoration(
-                              color: _flowRate < 15
+                              color: _flowRate < 250
                                   ? cyan.withOpacity(0.08)
                                   : Colors.grey.shade100,
                               borderRadius: BorderRadius.circular(12),
                               border: Border.all(
-                                color: _flowRate < 15
+                                color: _flowRate < 250
                                     ? cyan.withOpacity(0.3)
                                     : borderCol,
                               ),
@@ -949,7 +949,7 @@ class _InfusionDialogState extends State<_InfusionDialog> {
                               Icons.add_rounded,
                               size: 28,
                               color:
-                                  _flowRate < 15 ? cyan : subText.withOpacity(0.4),
+                                  _flowRate < 250 ? cyan : subText.withOpacity(0.4),
                             ),
                           ),
                         ),

@@ -73,7 +73,12 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
   int _powerWatts = 50;
   int _timerMinutes = 5; // Continuous only (minutes)
   int _timerSeconds = 60; // Footswitch / Endovorus (seconds)
-  double _pumpFlow = 5.0; // Endovorus pump flow rate (0–15 m/s)
+  double _pumpFlow = 5.0; // Endovorus pump flow rate (0–25 L/min)
+
+  // ── SET button tracking (must press SET before pump can turn on) ───────────
+  bool _powerSet = false;
+  bool _timerSet = false;
+  bool _flowSet = false; // Endovorus only
 
   // ── State machine ──────────────────────────────────────────────────────────
   bool _isPumpOn = false;
@@ -81,8 +86,12 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
   bool _isMuted = false;
   bool _footswitchActive = false;
 
-  // ── Pump waiting state (for footswitch/endo: pump waits for foot-switch) ───
-  bool _pumpWaiting = false; // pump button pressed, awaiting footswitch signal
+  // ── Pump waiting state: in footswitch mode, pump is on but oven awaits footswitch
+  bool _pumpWaiting = false;
+
+  // ── Footswitch oven pending: pump ON, waiting for footswitch to start oven ─
+  bool _awaitingFootswitch =
+      false; // footswitch mode: pump on, oven not yet started
 
   // ── Timer ──────────────────────────────────────────────────────────────────
   Timer? _ovenTimer;
@@ -137,10 +146,16 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     // Subscribe to serial data stream
     _serialSub = _serial.dataStream.listen(_onSerialData);
 
-    // Send start procedure command
+    // Send activation command on screen open:
+    //   1100 → Continuous mode
+    //   1101 → Footswitch or Endovascular mode
     if (_serial.isConnected) {
-      _serial.sendStartProcedure();
-      _log('Serial: Sent START (11) to device.', level: 'success');
+      final isFootOrEndo = _isFootswitchMode(_mode) || _isEndoMode(_mode);
+      _serial.sendActivation(isFootOrEndo);
+      _log(
+        'Serial: Sent ACTIVATION (${isFootOrEndo ? '1101' : '1100'}) to device.',
+        level: 'success',
+      );
     } else {
       _log('Serial not connected — running in offline mode.', level: 'warning');
     }
@@ -191,6 +206,56 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
           break;
         case SerialCommandType.footswitch:
           _scheduleLog('Footswitch ACTIVE (serial signal 25)', level: 'info');
+
+          // ── Endovascular: footswitch turns PUMP ON (phase 1) ──
+          if (_isEndoMode(_mode) && _pumpWaiting && !_isPumpOn) {
+            _scheduleLog(
+              'Footswitch received — Pump turning ON.',
+              level: 'success',
+            );
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
+              setState(() {
+                _pumpWaiting = false;
+                _isPumpOn = true;
+                _pumpOnAt = DateTime.now();
+              });
+              _serial.sendPump(true);
+              _log('PUMP ON (footswitch triggered)', level: 'warning');
+            });
+            break;
+          }
+
+          // ── Endovascular: footswitch starts OVEN (phase 2, pump already OFF) ──
+          if (_isEndoMode(_mode) &&
+              _awaitingFootswitch &&
+              !_isPumpOn &&
+              !_isOvenOn) {
+            _awaitingFootswitch = false;
+            _scheduleLog(
+              'Footswitch received — starting oven.',
+              level: 'success',
+            );
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) _startOven();
+            });
+            break;
+          }
+
+          // ── Footswitch mode: footswitch starts OVEN ──
+          if (_isFootswitchMode(_mode) &&
+              _isPumpOn &&
+              !_isOvenOn &&
+              _awaitingFootswitch) {
+            _awaitingFootswitch = false;
+            _scheduleLog(
+              'Footswitch received — starting oven.',
+              level: 'success',
+            );
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) _startOven();
+            });
+          }
           break;
         case SerialCommandType.unknown:
           if (cmd.raw != null) {
@@ -243,17 +308,56 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
   }
 
   // ── Pump control ───────────────────────────────────────────────────────────
-  // Endovorus / Footswitch: clicking pump button puts it in "waiting" state.
-  //   When footswitch signal arrives → pump activates automatically.
-  // Continuous: pump can toggle freely (no footswitch dependency).
-  //
-  // Oven always requires pump to be ON first (all modes).
+  // Continuous:  pump turns ON immediately after SET; oven requires pump ON.
+  // Footswitch:  pump turns ON immediately; oven armed by button + footswitch.
+  // Endovascular:
+  //   Phase 1 — click Pump → wait for footswitch → pump turns ON.
+  //   Phase 2 — pump OFF → click Oven → wait for footswitch → oven starts.
   void _togglePump() {
+    // ── Endovascular mode ──
+    if (_isEndoMode(_mode)) {
+      if (_isPumpOn) {
+        // Turn pump off; also cancel any pending oven-wait
+        setState(() {
+          _isPumpOn = false;
+          _awaitingFootswitch = false;
+        });
+        _serial.sendPump(false);
+        _log('PUMP OFF', level: 'info');
+        _pumpOnAt = null;
+        return;
+      }
+      if (_pumpWaiting) {
+        // Cancel the pump footswitch wait
+        setState(() => _pumpWaiting = false);
+        _log('Pump footswitch wait cancelled.', level: 'info');
+        return;
+      }
+      // Guard: SET must be confirmed
+      final canTurnOn = _powerSet && _timerSet && _flowSet;
+      if (!canTurnOn) {
+        _log(
+          'Set Power, Timer and Flow Rate before turning on pump.',
+          level: 'warning',
+        );
+        return;
+      }
+      // Arm pump — wait for footswitch to actually turn it on
+      setState(() => _pumpWaiting = true);
+      _log(
+        'Endovascular: waiting for footswitch to turn pump ON…',
+        level: 'warning',
+      );
+      return;
+    }
+
+    // ── Continuous / Footswitch modes ──
     if (_isPumpOn) {
-      // Turn pump off (always allowed)
+      // Turn pump off — also cancels any pending footswitch wait
       setState(() {
         _isPumpOn = false;
         _pumpWaiting = false;
+        _awaitingFootswitch = false;
       });
       _serial.sendPump(false);
       _log('PUMP OFF', level: 'info');
@@ -262,13 +366,19 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     }
 
     if (_pumpWaiting) {
-      // Cancel waiting state
       setState(() => _pumpWaiting = false);
       _log('Pump wait cancelled.', level: 'info');
       return;
     }
 
-    // Toggle pump immediately for all modes
+    // Guard: SET must have been pressed for power and timer.
+    final canTurnOn = _powerSet && _timerSet;
+    if (!canTurnOn) {
+      _log('Set Power and Timer before turning on pump.', level: 'warning');
+      return;
+    }
+
+    // Turn pump ON immediately
     setState(() {
       _isPumpOn = true;
       _pumpOnAt = DateTime.now();
@@ -278,13 +388,54 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
   }
 
   // ── Oven control ───────────────────────────────────────────────────────────
-  // All modes: oven can only start if pump is ON.
+  // Continuous:   oven requires pump ON → starts immediately.
+  // Footswitch:   click oven → arm → footswitch signal → oven starts.
+  // Endovascular: pump must be OFF; click oven → arm → footswitch → oven starts.
   void _toggleOven() {
-    // Continuous/Footswitch: oven requires pump ON.
-    // Endovorus: oven requires pump OFF (mutually exclusive).
-    if (!_isEndoMode(_mode) && !_isPumpOn) return;
-    if (_isEndoMode(_mode) && _isPumpOn) return;
+    // ── Footswitch mode ──
+    if (_isFootswitchMode(_mode)) {
+      if (_isOvenOn) {
+        _stopOven();
+        return;
+      }
+      if (_awaitingFootswitch) {
+        setState(() => _awaitingFootswitch = false);
+        _log('Footswitch wait cancelled.', level: 'info');
+        return;
+      }
+      if (!_isPumpOn) return;
+      setState(() => _awaitingFootswitch = true);
+      _log(
+        'Footswitch mode: oven armed — waiting for footswitch signal…',
+        level: 'warning',
+      );
+      return;
+    }
 
+    // ── Endovascular mode ──
+    if (_isEndoMode(_mode)) {
+      if (_isPumpOn || _pumpWaiting) return; // pump must be fully off first
+      if (_isOvenOn) {
+        _stopOven();
+        return;
+      }
+      if (_awaitingFootswitch) {
+        // Cancel oven wait
+        setState(() => _awaitingFootswitch = false);
+        _log('Oven footswitch wait cancelled.', level: 'info');
+        return;
+      }
+      // Arm oven — wait for footswitch signal
+      setState(() => _awaitingFootswitch = true);
+      _log(
+        'Endovascular: oven armed — waiting for footswitch signal…',
+        level: 'warning',
+      );
+      return;
+    }
+
+    // ── Continuous mode ──
+    if (!_isPumpOn) return;
     _isOvenOn ? _stopOven() : _startOven();
   }
 
@@ -389,12 +540,18 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
       setState(() {
         _isPumpOn = false;
         _pumpWaiting = false;
+        _awaitingFootswitch = false;
         _pumpOnAt = null;
       });
       _serial.sendPump(false);
     }
-    // Reset cycle count on procedure end
-    setState(() => _cycleCount = 1);
+    // Reset cycle count and SET flags on procedure end
+    setState(() {
+      _cycleCount = 1;
+      _powerSet = false;
+      _timerSet = false;
+      _flowSet = false;
+    });
     _log('Procedure ended by user.', level: 'warning');
 
     if (widget.procedure != null) {
@@ -441,6 +598,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
             setState(() {
               _isPumpOn = false;
               _pumpWaiting = false;
+              _awaitingFootswitch = false;
             });
             _serial.sendPump(false);
           }
@@ -1067,9 +1225,20 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
               max: 150,
               step: 5,
               locked: locked,
+              isSet: _powerSet,
               onChanged: (v) {
-                setState(() => _powerWatts = v);
+                setState(() {
+                  _powerWatts = v;
+                  _powerSet = false; // changing value resets SET state
+                });
+              },
+              onSet: (v) {
+                setState(() => _powerSet = true);
                 _serial.sendPower(v);
+                _log(
+                  'SET Power: $v W → sent 12${v.toRadixString(16).toUpperCase().padLeft(2, '0')}',
+                  level: 'info',
+                );
               },
             ),
           ),
@@ -1089,6 +1258,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
               max: _mode == 'Continuous' ? 60 : 300,
               step: _mode == 'Continuous' ? 1 : 10,
               locked: locked,
+              isSet: _timerSet,
               onChanged: (v) {
                 setState(() {
                   if (_mode == 'Continuous') {
@@ -1098,13 +1268,21 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
                     _timerSeconds = v;
                     if (!_isOvenOn) _remainingSeconds = v;
                   }
+                  _timerSet = false; // changing value resets SET state
                 });
+              },
+              onSet: (v) {
+                setState(() => _timerSet = true);
                 final secs = _mode == 'Continuous' ? v * 60 : v;
                 _serial.sendTimer(secs);
+                _log(
+                  'SET Timer: ${secs}s → sent 13${secs.toRadixString(16).toUpperCase().padLeft(2, '0')}',
+                  level: 'info',
+                );
               },
             ),
           ),
-          // Pump flow (Endovorus only) — 0–15 m/s
+          // Pump flow (Endovorus only) — 0–25 L/min
           if (_isEndoMode(_mode)) ...[
             const SizedBox(height: 12),
             const Divider(color: _kBorder, height: 1),
@@ -1115,15 +1293,27 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
                 icon: Icons.water_drop_outlined,
                 color: _kOrange,
                 value: _pumpFlow.toInt(),
-                unit: 'm/s',
-                hint: '0 – 15 m/s',
+                unit: 'L/min',
+                hint: '0 – 25 L/min',
                 min: 0,
-                max: 15,
+                max: 25,
                 step: 1,
                 locked: locked,
+                isSet: _flowSet,
                 onChanged: (v) {
-                  setState(() => _pumpFlow = v.toDouble());
-                  _serial.sendPumpFlowRate(v);
+                  setState(() {
+                    _pumpFlow = v.toDouble();
+                    _flowSet = false; // changing value resets SET state
+                  });
+                },
+                onSet: (v) {
+                  setState(() => _flowSet = true);
+                  _serial.sendPumpFlowRate(v.toDouble());
+                  final raw = (v.toDouble() * 10).round();
+                  _log(
+                    'SET Pump Flow: $v L/min → sent 17${raw.toRadixString(16).toUpperCase().padLeft(2, '0')}',
+                    level: 'info',
+                  );
                 },
               ),
             ),
@@ -1137,58 +1327,87 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
   // CONTROL BUTTONS (Pump + Oven — same visual weight)
   // ─────────────────────────────────────────────────────────────────────────
   Widget _buildControlButtons() {
-    // Pump logic:
-    //   - Endovorus: clicking pump enters "waiting" state (auto-activates when footswitch fires).
-    //   - Continuous/Footswitch: pump toggles immediately.
-    //   - Pump is disabled if oven is ON.
-    //
-    // Oven logic:
-    //   - Continuous/Footswitch: Oven can only start if pump is ON.
-    //   - Endovorus: Oven and Pump are mutually exclusive (oven requires pump OFF).
+    // Continuous:    pump SET → ON immediately; oven needs pump ON.
+    // Footswitch:    pump SET → ON immediately; click oven → arm → footswitch → oven.
+    // Endovascular:  pump SET → click pump → arm → footswitch → pump ON;
+    //                pump OFF → click oven → arm → footswitch → oven starts.
 
-    final bool pumpEnabled = !_isOvenOn;
-    final bool ovenEnabled = _isEndoMode(_mode) ? !_isPumpOn : _isPumpOn;
+    final bool setReady =
+        _powerSet && _timerSet && (!_isEndoMode(_mode) || _flowSet);
 
-    // Pump button label
+    // Pump enabled if: not oven running, AND (setReady, or pump already on/waiting)
+    final bool pumpEnabled =
+        !_isOvenOn &&
+        !_awaitingFootswitch &&
+        (setReady || _isPumpOn || _pumpWaiting);
+
+    // Oven enabled:
+    //   Continuous:    pump must be ON
+    //   Footswitch:    pump must be ON (to arm footswitch wait)
+    //   Endovascular:  pump must be fully OFF (not waiting, not on)
+    final bool ovenEnabled = _isEndoMode(_mode)
+        ? (!_isPumpOn && !_pumpWaiting) // pump fully off
+        : _isPumpOn; // continuous & footswitch: pump on
+
+    // ── Pump button ──
     String pumpLabel;
     if (_isPumpOn) {
       pumpLabel = 'TURN OFF PUMP';
     } else if (_pumpWaiting) {
-      pumpLabel = 'WAITING…';
+      pumpLabel = 'CANCEL WAIT';
     } else {
       pumpLabel = 'TURN ON PUMP';
     }
 
-    // Pump status line
     String pumpStatus;
     if (_isOvenOn) {
       pumpStatus = 'Oven is active';
     } else if (_isPumpOn) {
-      if (_isEndoMode(_mode)) {
-        pumpStatus = 'Running at ${_pumpFlow.toInt()} m/s';
-      } else {
-        pumpStatus = 'Pump running';
-      }
+      pumpStatus = _isEndoMode(_mode)
+          ? 'Running at ${_pumpFlow.toStringAsFixed(1)} L/min'
+          : 'Pump running';
     } else if (_pumpWaiting) {
-      pumpStatus = 'Activate footswitch…';
+      pumpStatus = 'Waiting for footswitch…';
+    } else if (!setReady) {
+      pumpStatus = _isEndoMode(_mode)
+          ? 'Set Power, Timer & Flow first'
+          : 'Set Power & Timer first';
     } else {
       pumpStatus = 'Pump is off';
     }
 
-    // Oven status line
+    // ── Oven button ──
+    String ovenLabel;
+    if (_isOvenOn) {
+      ovenLabel = 'STOP OVEN';
+    } else if (_awaitingFootswitch) {
+      ovenLabel = 'CANCEL WAIT';
+    } else {
+      ovenLabel = 'START';
+    }
+
     String ovenStatus;
     if (_isOvenOn) {
       ovenStatus = 'Ablation in progress';
+    } else if (_awaitingFootswitch) {
+      ovenStatus = 'Waiting for footswitch…';
+    } else if (_isFootswitchMode(_mode)) {
+      ovenStatus = _isPumpOn ? 'Click to arm footswitch' : 'Start pump first';
     } else if (_isEndoMode(_mode)) {
-      ovenStatus = _isPumpOn ? 'Stop pump first' : 'Ready to start';
+      if (_isPumpOn || _pumpWaiting) {
+        ovenStatus = 'Turn pump off first';
+      } else {
+        ovenStatus = 'Click to arm footswitch';
+      }
     } else {
       ovenStatus = _isPumpOn ? 'Ready to start' : 'Start pump first';
     }
 
-    // Oven disabled hint
     String ovenDisabledHint;
     if (_isEndoMode(_mode)) {
-      ovenDisabledHint = 'Stop pump first';
+      ovenDisabledHint = _pumpWaiting
+          ? 'Pump footswitch pending'
+          : 'Turn pump off first';
     } else {
       ovenDisabledHint = 'Start pump first';
     }
@@ -1200,13 +1419,21 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
           child: _HardwareButton(
             label: pumpLabel,
             icon: _pumpWaiting
-                ? Icons.hourglass_top_rounded
+                ? Icons.electrical_services_rounded
                 : Icons.water_drop_rounded,
             active: _isPumpOn || _pumpWaiting,
             activeColor: _pumpWaiting ? _kAmber : _kOrange,
-            inactiveColor: _kGreen,
+            inactiveColor: setReady ? _kGreen : _kSubText,
             enabled: pumpEnabled,
-            disabledHint: _isOvenOn ? 'Stop oven first' : null,
+            disabledHint: _isOvenOn
+                ? 'Stop oven first'
+                : _awaitingFootswitch
+                ? 'Oven footswitch armed'
+                : !setReady
+                ? (_isEndoMode(_mode)
+                      ? 'Set Power, Timer & Flow first'
+                      : 'Set Power & Timer first')
+                : null,
             onTap: _togglePump,
             statusLine: pumpStatus,
             pulseAnim: (_isPumpOn || _pumpWaiting) ? _pulseAnim : null,
@@ -1216,16 +1443,18 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
         // ── Oven ──
         Expanded(
           child: _HardwareButton(
-            label: _isOvenOn ? 'STOP OVEN' : 'START',
-            icon: Icons.microwave_outlined,
-            active: _isOvenOn,
-            activeColor: _kRed,
+            label: ovenLabel,
+            icon: _awaitingFootswitch
+                ? Icons.electrical_services_rounded
+                : Icons.microwave_outlined,
+            active: _isOvenOn || _awaitingFootswitch,
+            activeColor: _awaitingFootswitch ? _kAmber : _kRed,
             inactiveColor: _kNavy,
             enabled: ovenEnabled,
             disabledHint: !ovenEnabled ? ovenDisabledHint : null,
             onTap: _toggleOven,
             statusLine: ovenStatus,
-            pulseAnim: _isOvenOn ? _pulseAnim : null,
+            pulseAnim: _isOvenOn || _awaitingFootswitch ? _pulseAnim : null,
           ),
         ),
       ],
@@ -1502,7 +1731,14 @@ class _BigParamControl extends StatelessWidget {
   final Color color;
   final int value, min, max, step;
   final bool locked;
+
+  /// Whether the SET button has been confirmed for this parameter.
+  /// True = value was sent to device. Resets when value changes.
+  final bool isSet;
   final Function(int) onChanged;
+
+  /// Callback fired when the SET button is tapped (sends value to device).
+  final Function(int)? onSet;
 
   const _BigParamControl({
     required this.label,
@@ -1515,12 +1751,15 @@ class _BigParamControl extends StatelessWidget {
     required this.max,
     required this.step,
     required this.locked,
+    required this.isSet,
     required this.onChanged,
+    this.onSet,
   });
 
   @override
   Widget build(BuildContext context) {
     final pct = ((value - min) / (max - min)).clamp(0.0, 1.0);
+    final confirmedColor = isSet && !locked ? _kGreen : color;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1537,21 +1776,78 @@ class _BigParamControl extends StatelessWidget {
               ),
             ),
             const Spacer(),
-            Container(
+            // Value display badge — green border when SET is confirmed
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
               decoration: BoxDecoration(
                 color: (locked ? _kSubText : color).withOpacity(0.1),
                 borderRadius: BorderRadius.circular(8),
+                border: isSet && !locked
+                    ? Border.all(color: _kGreen, width: 2)
+                    : null,
               ),
               child: Text(
                 '$value $unit',
                 style: TextStyle(
                   color: locked ? _kSubText : color,
-                  fontSize: 32,
+                  fontSize: 28,
                   fontWeight: FontWeight.w900,
                 ),
               ),
             ),
+            // SET button — turns green with checkmark when confirmed
+            if (onSet != null) ...[
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: locked ? null : () => onSet!(value),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: locked
+                        ? Colors.grey.shade100
+                        : isSet
+                        ? _kGreen.withOpacity(0.12)
+                        : color.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: locked
+                          ? _kBorder
+                          : isSet
+                          ? _kGreen.withOpacity(0.7)
+                          : color.withOpacity(0.5),
+                      width: isSet && !locked ? 2 : 1.5,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (isSet && !locked) ...[
+                        const Icon(
+                          Icons.check_rounded,
+                          size: 13,
+                          color: _kGreen,
+                        ),
+                        const SizedBox(width: 4),
+                      ],
+                      Text(
+                        'SET',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 1,
+                          color: locked ? _kSubText : confirmedColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
         const SizedBox(height: 14),

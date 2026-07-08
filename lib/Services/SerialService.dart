@@ -174,13 +174,27 @@ class SerialService {
     }
   }
 
+  // ── Hex helper ─────────────────────────────────────────────────────────────
+  /// Converts [value] to uppercase hexadecimal string, zero-padded to at
+  /// least 2 digits.
+  /// e.g.  10 → '0A'   (not 'A')
+  ///       16 → '10'
+  ///      255 → 'FF'
+  ///      300 → '012C'
+  static String _toHex(int value) {
+    final hex = value.toRadixString(16).toUpperCase();
+    // Ensure minimum 2 hex digits so 10 → '0A', giving '120A' not '12A'
+    return hex.length < 2 ? hex.padLeft(2, '0') : hex;
+  }
+
   // ── Send Command ───────────────────────────────────────────────────────────
-  /// Sends a command string to the device. Appends `\n` terminator.
+  /// Sends a command string to the device.
+  /// Always prints to debug console regardless of connection state.
   bool send(String command) {
-    print('Serial Send: $command'); // Show in debug console
+    print('Serial Send: $command'); // Always visible in debug console
     if (_port == null || !_port!.isOpen) return false;
     try {
-      final bytes = Uint8List.fromList('$command\n'.codeUnits);
+      final bytes = Uint8List.fromList(command.codeUnits);
       _port!.write(bytes);
       return true;
     } catch (_) {
@@ -193,11 +207,22 @@ class SerialService {
   /// Send `11` — start procedure
   bool sendStartProcedure() => send('11');
 
-  /// Send `12{value}` — set power in watts
-  bool sendPower(int watts) => send('12$watts');
+  /// Send `1100` — activation screen opened in Continuous mode
+  /// Send `1101` — activation screen opened in Footswitch / Endovascular mode
+  bool sendActivation(bool footswitchOrEndo) =>
+      send(footswitchOrEndo ? '1101' : '1100');
 
-  /// Send `13{value}` — set timer in seconds
-  bool sendTimer(int seconds) => send('13$seconds');
+  /// Send `12{HEX2}` — set power in watts, value zero-padded to ≥2 hex digits
+  /// e.g.  10 W → '120A'
+  ///       75 W → '124B'
+  ///      150 W → '1296'
+  bool sendPower(int watts) => send('12${_toHex(watts)}');
+
+  /// Send `13{HEX2}` — set timer in seconds, value zero-padded to ≥2 hex digits
+  /// e.g.  10 s → '130A'
+  ///       60 s → '133C'
+  ///      300 s → '1312C'
+  bool sendTimer(int seconds) => send('13${_toHex(seconds)}');
 
   /// Send `1401` / `1400` — pump ON / OFF
   bool sendPump(bool on) => send(on ? '1401' : '1400');
@@ -208,11 +233,21 @@ class SerialService {
   /// Send `1601` / `1600` — oven ON/OFF in Footswitch/Endovorus mode
   bool sendOvenFootswitch(bool on) => send(on ? '1601' : '1600');
 
-  /// Send `17{value}` — set pump flow rate in Endovorus mode
-  bool sendPumpFlowRate(int rate) => send('17$rate');
+  /// Send `17{HEX2}` — set pump flow rate in Endovorus mode
+  /// Value = rateL × 10 (tenths of L/min), zero-padded to ≥2 hex digits
+  /// e.g. 1.0 L/min → 10 → '170A'
+  ///      5.0 L/min → 50 → '1732'
+  bool sendPumpFlowRate(double rateL) {
+    final raw = (rateL * 10).round();
+    return send('17${_toHex(raw)}');
+  }
 
-  /// Send `18{value}` — set infusion flow rate
-  bool sendInfusionFlowRate(int rate) => send('18$rate');
+  /// Send `18{HEX2}` — set infusion flow rate (value in L/min × 10, encoded as hex)
+  /// e.g. 1.0 L/min → 10 → '180A'
+  bool sendInfusionFlowRate(double rateL) {
+    final raw = (rateL * 10).round();
+    return send('18${_toHex(raw)}');
+  }
 
   // ── Incoming Data Parser ───────────────────────────────────────────────────
   void _onData(Uint8List data) {
