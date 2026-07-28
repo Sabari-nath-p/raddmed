@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:developer';
+import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,9 +10,6 @@ import 'package:raddmed/Repositories/ProcedureRepository.dart';
 import 'package:raddmed/Services/SerialService.dart';
 import 'package:raddmed/Widgets/UnifiedHeader.dart';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Design Tokens
-// ─────────────────────────────────────────────────────────────────────────────
 const _kNavy = Color(0xFF0D1B2A);
 const _kNavyLight = Color(0xFF1A2E47);
 const _kRed = Color(0xFFE3192B);
@@ -23,10 +22,8 @@ const _kCard = Colors.white;
 const _kBorder = Color(0xFFE4E8EF);
 const _kSubText = Color(0xFF8A96A8);
 const _kOrange = Color(0xFFEA580C);
+const _kTeal = Color(0xFF0EA5A5);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
 class _LogEntry {
   final String time;
   final String message;
@@ -73,16 +70,21 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
   int _powerWatts = 50;
   int _timerMinutes = 5; // Continuous only (minutes)
   int _timerSeconds = 60; // Footswitch / Endovorus (seconds)
-  double _pumpFlow = 5.0; // Endovorus pump flow rate (0–25 L/min)
+  int _pumpFlow = 5; // Endovorus pump flow rate (0–250 L/min)
+  int _shaftTempTarget = 60; // NEW: Shaft temperature target (°C)
+  int _edgeTempTarget = 60; // NEW: Edge temperature target (°C)
 
   // ── SET button tracking (must press SET before pump can turn on) ───────────
   bool _powerSet = false;
   bool _timerSet = false;
   bool _flowSet = false; // Endovorus only
+  bool _shaftTempSet = false; // NEW
+  bool _edgeTempSet = false; // NEW
 
   // ── State machine ──────────────────────────────────────────────────────────
   bool _isPumpOn = false;
   bool _isOvenOn = false;
+  bool _isPaused = false; // NEW: Continuous-mode pause state
   bool _isMuted = false;
   bool _footswitchActive = false;
 
@@ -114,7 +116,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
   final List<double> _edgeHist = [];
   final List<double> _voltageHist = [];
 
-  // ── Logs ───────────────────────────────────────────────────────────────────
+  // ── Logs (kept for procedure-log persistence; preview widget removed) ──────
   final List<_LogEntry> _logs = [];
 
   // ── Animation ──────────────────────────────────────────────────────────────
@@ -149,16 +151,13 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     // Send activation command on screen open:
     //   1100 → Continuous mode
     //   1101 → Footswitch or Endovascular mode
-    if (_serial.isConnected) {
-      final isFootOrEndo = _isFootswitchMode(_mode) || _isEndoMode(_mode);
-      _serial.sendActivation(isFootOrEndo);
-      _log(
-        'Serial: Sent ACTIVATION (${isFootOrEndo ? '1101' : '1100'}) to device.',
-        level: 'success',
-      );
-    } else {
-      _log('Serial not connected — running in offline mode.', level: 'warning');
-    }
+
+    final isFootOrEndo = _isFootswitchMode(_mode) || _isEndoMode(_mode);
+    _serial.sendActivation(isFootOrEndo);
+    _log(
+      'Serial: Sent ACTIVATION (${isFootOrEndo ? '1101' : '1100'}) to device.',
+      level: 'success',
+    );
 
     _log('System initialized — ${_mode} mode ready.', level: 'success');
     _log(
@@ -266,7 +265,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     });
   }
 
-  // ── Logging ────────────────────────────────────────────────────────────────
+  // ── Logging (kept for procedure-log persistence) ───────────────────────────
   void _log(String msg, {String level = 'info'}) {
     final n = DateTime.now();
     final t =
@@ -283,6 +282,53 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     });
   }
 
+  // ── Beep sound handling ─────────────────────────────────────────────────
+  // Uses native OS system sounds via dart:io Process.run — no asset files
+  // required. Platform dispatch:
+  //   macOS   → afplay on built-in /System/Library/Sounds/*.aiff files
+  //   Windows → PowerShell [console]::Beep(freq, ms)
+  //   Linux   → paplay on freedesktop system sounds (best-effort)
+  // If the process call fails for any reason, falls back to SystemSound.
+  Future<void> _playBeep({bool long = false}) async {
+    try {
+      if (Platform.isMacOS) {
+        if (long) {
+          // Play two system sounds back-to-back for a distinct "end" alert.
+          await Process.run('afplay', ['/System/Library/Sounds/Glass.aiff']);
+          await Future.delayed(const Duration(milliseconds: 100));
+          await Process.run('afplay', ['/System/Library/Sounds/Glass.aiff']);
+        } else {
+          await Process.run('afplay', ['/System/Library/Sounds/Tink.aiff']);
+        }
+      } else if (Platform.isWindows) {
+        if (long) {
+          // Three high-pitched beeps to signal timer end.
+          await Process.run('powershell', ['-c', '[console]::Beep(1000,400)']);
+          await Future.delayed(const Duration(milliseconds: 100));
+          await Process.run('powershell', ['-c', '[console]::Beep(1000,400)']);
+          await Future.delayed(const Duration(milliseconds: 100));
+          await Process.run('powershell', ['-c', '[console]::Beep(1200,600)']);
+        } else {
+          // Short tick beep every second.
+          await Process.run('powershell', ['-c', '[console]::Beep(800,200)']);
+        }
+      } else if (Platform.isLinux) {
+        final sound = long ? 'complete' : 'audio-volume-change';
+        await Process.run('paplay', [
+          '--property=media.role=event',
+          '/usr/share/sounds/freedesktop/stereo/$sound.oga',
+        ]);
+      } else {
+        // Generic fallback for any other platform.
+        SystemSound.play(long ? SystemSoundType.alert : SystemSoundType.click);
+      }
+    } catch (_) {
+      // If the OS command fails (sound not found, permission, etc.)
+      // fall back to Flutter's built-in system sound.
+      SystemSound.play(long ? SystemSoundType.alert : SystemSoundType.click);
+    }
+  }
+
   // ── Helpers ────────────────────────────────────────────────────────────────
   String _fmt(int s) {
     if (s < 0) return '--:--';
@@ -292,19 +338,6 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
   String _timerDisplayStr() {
     if (_mode == 'Continuous') return '$_timerMinutes min';
     return '$_timerSeconds s';
-  }
-
-  Color _logColor(String level) {
-    switch (level) {
-      case 'warning':
-        return _kAmber;
-      case 'success':
-        return _kGreen;
-      case 'error':
-        return _kRed;
-      default:
-        return _kBlue;
-    }
   }
 
   // ── Pump control ───────────────────────────────────────────────────────────
@@ -414,13 +447,18 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
 
     // ── Endovascular mode ──
     if (_isEndoMode(_mode)) {
-      if (_isPumpOn || _pumpWaiting) return; // pump must be fully off first
+      if (_isPumpOn || _pumpWaiting) {}
       if (_isOvenOn) {
         _stopOven();
+
         return;
+      } else {
+        _serial.sendOvenFootswitch(true);
       }
       if (_awaitingFootswitch) {
         // Cancel oven wait
+        _stopOven();
+
         setState(() => _awaitingFootswitch = false);
         _log('Oven footswitch wait cancelled.', level: 'info');
         return;
@@ -443,6 +481,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     final initSecs = _mode == 'Continuous' ? _timerMinutes * 60 : _timerSeconds;
     setState(() {
       _isOvenOn = true;
+      _isPaused = false;
       _elapsedSeconds = 0;
       // Do NOT reset _cycleCount here — only reset on End Procedure
       _remainingSeconds = initSecs;
@@ -460,53 +499,60 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     }
     _log('OVEN ON — Power: $_powerWatts W | Mode: $_mode', level: 'warning');
 
+    _runOvenTimerLoop();
+  }
+
+  // Extracted so Pause/Resume (Continuous mode only) can restart the
+  // countdown without resetting elapsed/remaining seconds.
+  void _runOvenTimerLoop() {
     _ovenTimer?.cancel();
     _ovenTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || !_isOvenOn) return;
-
-        final shouldTick = true;
+        if (!mounted || !_isOvenOn || _isPaused) return;
 
         setState(() {
           _elapsedSeconds++;
 
-          // Beep
-          if (!_isMuted && shouldTick) {
-            _beepFlash = !_beepFlash;
-            SystemSound.play(SystemSoundType.click);
-          } else {
-            _beepFlash = false;
-          }
-
           // Countdown
-          if (shouldTick) {
-            _remainingSeconds = math.max(0, _remainingSeconds - 1);
-            if (_remainingSeconds <= 0) {
-              if (_isFootswitchMode(_mode) || _isEndoMode(_mode)) {
-                _cycleCount++;
-                _remainingSeconds = _timerSeconds;
-                _scheduleLog('Cycle $_cycleCount ready.', level: 'success');
-              }
-              // Auto stop oven and pump
-              _isOvenOn = false;
-              _ovenTimer?.cancel();
+          _remainingSeconds = math.max(0, _remainingSeconds - 1);
+
+          if (_remainingSeconds <= 0) {
+            _beepFlash = false;
+            if (!_isMuted) _playBeep(long: true); // long beep on completion
+
+            if (_isFootswitchMode(_mode) || _isEndoMode(_mode)) {
+              _cycleCount++;
+              _remainingSeconds = _timerSeconds;
+              _scheduleLog('Cycle $_cycleCount ready.', level: 'success');
+            }
+            // Auto stop oven and pump
+            _isOvenOn = false;
+            _isPaused = false;
+            _ovenTimer?.cancel();
+            _beepFlash = false;
+            _footswitchActive = false;
+            _isPumpOn = false;
+            _pumpWaiting = false;
+            _pumpOnAt = null;
+            _ovenOnAt = null;
+            // Send oven OFF via serial
+            if (_mode == 'Continuous') {
+              _serial.sendOvenContinuous(false);
+            } else {
+              _serial.sendOvenFootswitch(false);
+            }
+            _serial.sendPump(false);
+            _scheduleLog(
+              'Timer complete — System auto-stopped (Oven & Pump OFF).',
+              level: 'warning',
+            );
+          } else {
+            // Regular tick beep
+            if (!_isMuted) {
+              _beepFlash = !_beepFlash;
+              _playBeep();
+            } else {
               _beepFlash = false;
-              _footswitchActive = false;
-              _isPumpOn = false;
-              _pumpWaiting = false;
-              _pumpOnAt = null;
-              _ovenOnAt = null;
-              // Send oven OFF via serial
-              if (_mode == 'Continuous') {
-                _serial.sendOvenContinuous(false);
-              } else {
-                _serial.sendOvenFootswitch(false);
-              }
-              _serial.sendPump(false);
-              _scheduleLog(
-                'Timer complete — System auto-stopped (Oven & Pump OFF).',
-                level: 'warning',
-              );
             }
           }
         });
@@ -518,6 +564,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     _ovenTimer?.cancel();
     setState(() {
       _isOvenOn = false;
+      _isPaused = false;
       _beepFlash = false;
       _footswitchActive = false;
     });
@@ -529,6 +576,35 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     }
     _log('OVEN OFF — Elapsed: ${_fmt(_elapsedSeconds)}', level: 'info');
     _ovenOnAt = null;
+  }
+
+  // ── Pause / Resume (Continuous mode only) ───────────────────────────────
+  // Pausing sends an oven-OFF command and stops the countdown timer while
+  // preserving elapsed/remaining seconds. Resuming re-sends oven-ON and
+  // continues the countdown from where it left off. "End Procedure" stays
+  // available at all times, paused or not.
+  void _togglePause() {
+    if (_mode != 'Continuous' || !_isOvenOn) return;
+
+    if (!_isPaused) {
+      // ── Pause ──
+      _ovenTimer?.cancel();
+      _serial.sendOvenContinuous(false);
+      setState(() => _isPaused = true);
+      _log(
+        'OVEN PAUSED — Elapsed: ${_fmt(_elapsedSeconds)}  Remaining: ${_fmt(_remainingSeconds)}',
+        level: 'warning',
+      );
+    } else {
+      // ── Resume ──
+      _serial.sendOvenContinuous(true);
+      setState(() => _isPaused = false);
+      _log(
+        'OVEN RESUMED — Remaining: ${_fmt(_remainingSeconds)}',
+        level: 'warning',
+      );
+      _runOvenTimerLoop();
+    }
   }
 
   // ── Footswitch state is driven exclusively by serial signal 25 ─────────────
@@ -551,6 +627,9 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
       _powerSet = false;
       _timerSet = false;
       _flowSet = false;
+      _shaftTempSet = false;
+      _edgeTempSet = false;
+      _isPaused = false;
     });
     _log('Procedure ended by user.', level: 'warning');
 
@@ -622,7 +701,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _buildSidebar(),
+                //     _buildSidebar(),
                 Expanded(
                   child: Padding(
                     padding: const EdgeInsets.all(14),
@@ -737,6 +816,23 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
         ? '${startTime.hour.toString().padLeft(2, '0')}:${startTime.minute.toString().padLeft(2, '0')}'
         : '--:--';
 
+    final statusColor = _isPaused
+        ? _kAmber
+        : _isOvenOn
+        ? _kRed
+        : (_isPumpOn || _pumpWaiting)
+        ? _kGreen
+        : _kSubText;
+    final statusLabel = _isPaused
+        ? 'PAUSED'
+        : _isOvenOn
+        ? 'ABLATING'
+        : _isPumpOn
+        ? 'PUMP ON'
+        : _pumpWaiting
+        ? 'PUMP WAIT'
+        : 'STANDBY';
+
     return UnifiedHeader(
       title: 'Active Ablation',
       trailing: Row(
@@ -745,26 +841,16 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
           // Status badge
           AnimatedBuilder(
             animation: _pulseAnim,
-            builder: (_, ch) =>
-                Opacity(opacity: _isOvenOn ? _pulseAnim.value : 1.0, child: ch),
+            builder: (_, ch) => Opacity(
+              opacity: (_isOvenOn && !_isPaused) ? _pulseAnim.value : 1.0,
+              child: ch,
+            ),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
-                color:
-                    (_isOvenOn
-                            ? _kRed
-                            : (_isPumpOn || _pumpWaiting)
-                            ? _kGreen
-                            : _kSubText)
-                        .withOpacity(0.15),
+                color: statusColor.withOpacity(0.15),
                 borderRadius: BorderRadius.circular(20),
-                border: Border.all(
-                  color: _isOvenOn
-                      ? _kRed
-                      : (_isPumpOn || _pumpWaiting)
-                      ? _kGreen
-                      : _kSubText,
-                ),
+                border: Border.all(color: statusColor),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -773,29 +859,15 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
                     width: 6,
                     height: 6,
                     decoration: BoxDecoration(
-                      color: _isOvenOn
-                          ? _kRed
-                          : (_isPumpOn || _pumpWaiting)
-                          ? _kGreen
-                          : _kSubText,
+                      color: statusColor,
                       shape: BoxShape.circle,
                     ),
                   ),
                   const SizedBox(width: 5),
                   Text(
-                    _isOvenOn
-                        ? 'ABLATING'
-                        : _isPumpOn
-                        ? 'PUMP ON'
-                        : _pumpWaiting
-                        ? 'PUMP WAIT'
-                        : 'STANDBY',
+                    statusLabel,
                     style: TextStyle(
-                      color: _isOvenOn
-                          ? _kRed
-                          : (_isPumpOn || _pumpWaiting)
-                          ? _kGreen
-                          : _kSubText,
+                      color: statusColor,
                       fontSize: 10,
                       fontWeight: FontWeight.w800,
                       letterSpacing: 1.2,
@@ -869,254 +941,8 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
   );
 
   // ─────────────────────────────────────────────────────────────────────────
-  // SIDEBAR
+  // SIDEBAR (system-log preview removed)
   // ─────────────────────────────────────────────────────────────────────────
-  Widget _buildSidebar() {
-    final proc = widget.procedure;
-    return Container(
-      width: 230,
-      color: _kNavyLight,
-      padding: const EdgeInsets.fromLTRB(12, 14, 12, 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Patient
-          _sideBlock('PATIENT', Icons.person_outline, _kBlue, [
-            _sRow('Name', proc?.patientName ?? 'N/A'),
-            _sRow('ID', proc?.patientId ?? 'N/A'),
-            _sRow('Area', proc?.category ?? 'N/A'),
-          ]),
-          const SizedBox(height: 10),
-          // Procedure
-          _sideBlock('PROCEDURE', Icons.science_outlined, _kPurple, [
-            _sRow('Antenna', proc?.antenna ?? 'N/A'),
-            _sRow(
-              'Serial',
-              (proc != null && proc.antennaSerialNumber.isNotEmpty)
-                  ? proc.antennaSerialNumber
-                  : 'N/A',
-            ),
-            _sRow('Mode', _mode),
-            _sRow('Power', '$_powerWatts W'),
-          ]),
-          const SizedBox(height: 10),
-          // Log
-          Expanded(
-            child: Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.25),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.white.withOpacity(0.07)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Icon(Icons.terminal, size: 12, color: _kGreen),
-                      const SizedBox(width: 5),
-                      const Text(
-                        'SYSTEM LOG',
-                        style: TextStyle(
-                          color: _kGreen,
-                          fontSize: 9,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 1,
-                        ),
-                      ),
-                      const Spacer(),
-                      GestureDetector(
-                        onTap: () => setState(() => _logs.clear()),
-                        child: Text(
-                          'Clear',
-                          style: TextStyle(
-                            color: Colors.white.withOpacity(0.25),
-                            fontSize: 9,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Expanded(
-                    child: _logs.isEmpty
-                        ? const Center(
-                            child: Text(
-                              'No events.',
-                              style: TextStyle(color: _kSubText, fontSize: 10),
-                            ),
-                          )
-                        : ListView.builder(
-                            itemCount: _logs.length,
-                            itemBuilder: (_, i) {
-                              final e = _logs[i];
-                              return Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 2,
-                                ),
-                                child: Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      e.time,
-                                      style: const TextStyle(
-                                        color: _kSubText,
-                                        fontSize: 8,
-                                        fontFamily: 'monospace',
-                                      ),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Container(
-                                      width: 5,
-                                      height: 5,
-                                      margin: const EdgeInsets.only(top: 3),
-                                      decoration: BoxDecoration(
-                                        color: _logColor(e.level),
-                                        shape: BoxShape.circle,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Expanded(
-                                      child: Text(
-                                        e.message,
-                                        style: TextStyle(
-                                          color: i == 0
-                                              ? Colors.white
-                                              : Colors.white54,
-                                          fontSize: 9,
-                                          fontWeight: i == 0
-                                              ? FontWeight.w700
-                                              : FontWeight.normal,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              );
-                            },
-                          ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 10),
-          // Status bottom strip
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(9),
-            decoration: BoxDecoration(
-              color: _isOvenOn
-                  ? _kRed.withOpacity(0.15)
-                  : Colors.white.withOpacity(0.05),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(
-                color: _isOvenOn
-                    ? _kRed.withOpacity(0.4)
-                    : Colors.white.withOpacity(0.08),
-              ),
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  _isOvenOn
-                      ? Icons.local_fire_department
-                      : _isPumpOn
-                      ? Icons.water_drop
-                      : _pumpWaiting
-                      ? Icons.hourglass_top_rounded
-                      : Icons.check_circle_outline,
-                  color: _isOvenOn
-                      ? _kRed
-                      : (_isPumpOn || _pumpWaiting)
-                      ? _kGreen
-                      : _kSubText,
-                  size: 14,
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  _isOvenOn
-                      ? 'Ablation Active'
-                      : _isPumpOn
-                      ? 'Pump Running'
-                      : _pumpWaiting
-                      ? 'Pump Waiting…'
-                      : 'System Ready',
-                  style: TextStyle(
-                    color: _isOvenOn
-                        ? _kRed
-                        : (_isPumpOn || _pumpWaiting)
-                        ? _kGreen
-                        : _kSubText,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _sideBlock(
-    String title,
-    IconData icon,
-    Color color,
-    List<Widget> rows,
-  ) => Container(
-    padding: const EdgeInsets.all(10),
-    decoration: BoxDecoration(
-      color: Colors.black.withOpacity(0.2),
-      borderRadius: BorderRadius.circular(9),
-      border: Border.all(color: Colors.white.withOpacity(0.07)),
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Icon(icon, size: 11, color: color),
-            const SizedBox(width: 5),
-            Text(
-              title,
-              style: TextStyle(
-                color: color,
-                fontSize: 9,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 1,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 7),
-        ...rows,
-      ],
-    ),
-  );
-
-  Widget _sRow(String l, String v) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 2.5),
-    child: Row(
-      children: [
-        Text(l, style: const TextStyle(color: _kSubText, fontSize: 10)),
-        const Spacer(),
-        Flexible(
-          child: Text(
-            v,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-            ),
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-      ],
-    ),
-  );
 
   // ─────────────────────────────────────────────────────────────────────────
   // METRICS ROW
@@ -1145,8 +971,10 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
           'Remaining',
           _isOvenOn ? _fmt(_remainingSeconds) : '--:--',
           '',
-          _kRed,
-          Icons.hourglass_bottom_rounded,
+          _isPaused ? _kAmber : _kRed,
+          _isPaused
+              ? Icons.pause_circle_outline
+              : Icons.hourglass_bottom_rounded,
         )
       else
         _MDef(
@@ -1166,7 +994,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
               (m) => Expanded(
                 child: Padding(
                   padding: const EdgeInsets.only(right: 10),
-                  child: _MetricCard(def: m, active: _isOvenOn),
+                  child: _MetricCard(def: m, active: _isOvenOn && !_isPaused),
                 ),
               ),
             )
@@ -1177,9 +1005,13 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
 
   // ─────────────────────────────────────────────────────────────────────────
   // PARAMETERS PANEL
+  //   Row 1: Power | Duration
+  //   Row 2: Shaft Temp Target | Edge Temp Target
+  //   Row 3: Pump Flow Rate (Endovorus only)
   // ─────────────────────────────────────────────────────────────────────────
   Widget _buildParametersPanel() {
-    // Parameters are locked only while the oven (ablation) is actively running.
+    // Parameters are locked only while the oven (ablation) is actively running
+    // (including while paused — the procedure is still considered in progress).
     final locked = _isOvenOn;
     return _Card(
       child: Column(
@@ -1209,100 +1041,180 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
               if (locked) _LockBadge(),
             ],
           ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 10),
           const Divider(color: _kBorder, height: 1),
-          const SizedBox(height: 14),
-          // Power
+          const SizedBox(height: 10),
+
+          // ── Row 1: Power | Duration ──
           Expanded(
-            child: _BigParamControl(
-              label: 'Output Power',
-              icon: Icons.bolt,
-              color: _kBlue,
-              value: _powerWatts,
-              unit: 'W',
-              hint: '5 – 150 W',
-              min: 5,
-              max: 150,
-              step: 5,
-              locked: locked,
-              isSet: _powerSet,
-              onChanged: (v) {
-                setState(() {
-                  _powerWatts = v;
-                  _powerSet = false; // changing value resets SET state
-                });
-              },
-              onSet: (v) {
-                setState(() => _powerSet = true);
-                _serial.sendPower(v);
-                _log(
-                  'SET Power: $v W → sent 12${v.toRadixString(16).toUpperCase().padLeft(2, '0')}',
-                  level: 'info',
-                );
-              },
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: _BigParamControl(
+                    label: 'Output Power',
+                    icon: Icons.bolt,
+                    color: _kBlue,
+                    value: _powerWatts,
+                    unit: 'W',
+                    hint: '5–150 W',
+                    min: 5,
+                    max: 150,
+                    step: 1,
+                    locked: locked,
+                    isSet: _powerSet,
+                    onChanged: (v) {
+                      setState(() {
+                        _powerWatts = v;
+                        _powerSet = false; // changing value resets SET state
+                      });
+                    },
+                    onSet: (v) {
+                      setState(() => _powerSet = true);
+                      _serial.sendPower(v);
+                      _log(
+                        'SET Power: $v W → sent 12${v.toRadixString(16).toUpperCase().padLeft(2, '0')}',
+                        level: 'info',
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _BigParamControl(
+                    label: _mode == 'Continuous' ? 'Duration' : 'Cycle Timer',
+                    icon: Icons.timer_outlined,
+                    color: _kGreen,
+                    value: _mode == 'Continuous'
+                        ? _timerMinutes
+                        : _timerSeconds,
+                    unit: _mode == 'Continuous' ? 'min' : 's',
+                    hint: _mode == 'Continuous' ? '1–60 min' : '10–300 s',
+                    min: _mode == 'Continuous' ? 1 : 10,
+                    max: _mode == 'Continuous' ? 60 : 300,
+                    step: 1,
+                    locked: locked,
+                    isSet: _timerSet,
+                    onChanged: (v) {
+                      setState(() {
+                        if (_mode == 'Continuous') {
+                          _timerMinutes = v;
+                          if (!_isOvenOn) _remainingSeconds = v * 60;
+                        } else {
+                          _timerSeconds = v;
+                          if (!_isOvenOn) _remainingSeconds = v;
+                        }
+                        _timerSet = false; // changing value resets SET state
+                      });
+                    },
+                    onSet: (v) {
+                      setState(() => _timerSet = true);
+                      //   final secs = _mode == 'Continuous' ? v * 60 : v;
+                      _serial.sendTimer(v);
+                    },
+                  ),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: 12),
+
+          const SizedBox(height: 10),
           const Divider(color: _kBorder, height: 1),
-          const SizedBox(height: 12),
-          // Timer
+          const SizedBox(height: 10),
+
+          // ── Row 2: Shaft Temp Target | Edge Temp Target ──
           Expanded(
-            child: _BigParamControl(
-              label: _mode == 'Continuous' ? 'Duration' : 'Cycle Timer',
-              icon: Icons.timer_outlined,
-              color: _kGreen,
-              value: _mode == 'Continuous' ? _timerMinutes : _timerSeconds,
-              unit: _mode == 'Continuous' ? 'min' : 's',
-              hint: _mode == 'Continuous' ? '1 – 60 min' : '10 – 300 s',
-              min: _mode == 'Continuous' ? 1 : 10,
-              max: _mode == 'Continuous' ? 60 : 300,
-              step: _mode == 'Continuous' ? 1 : 10,
-              locked: locked,
-              isSet: _timerSet,
-              onChanged: (v) {
-                setState(() {
-                  if (_mode == 'Continuous') {
-                    _timerMinutes = v;
-                    if (!_isOvenOn) _remainingSeconds = v * 60;
-                  } else {
-                    _timerSeconds = v;
-                    if (!_isOvenOn) _remainingSeconds = v;
-                  }
-                  _timerSet = false; // changing value resets SET state
-                });
-              },
-              onSet: (v) {
-                setState(() => _timerSet = true);
-                final secs = _mode == 'Continuous' ? v * 60 : v;
-                _serial.sendTimer(secs);
-                _log(
-                  'SET Timer: ${secs}s → sent 13${secs.toRadixString(16).toUpperCase().padLeft(2, '0')}',
-                  level: 'info',
-                );
-              },
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: _BigParamControl(
+                    label: 'Shaft Temp Target',
+                    icon: Icons.thermostat,
+                    color: _kAmber,
+                    value: _shaftTempTarget,
+                    unit: '°C',
+                    hint: '20–100 °C',
+                    min: 20,
+                    max: 100,
+                    step: 1,
+                    locked: locked,
+                    isSet: _shaftTempSet,
+                    onChanged: (v) {
+                      setState(() {
+                        _shaftTempTarget = v;
+                        _shaftTempSet = false;
+                      });
+                    },
+                    onSet: (v) {
+                      setState(() => _shaftTempSet = true);
+                      // Requires SerialService.sendShaftTemp(int) — see
+                      // note at top of this file.
+                      _serial.sendShaftTemp(v);
+                      _log(
+                        'SET Shaft Temp Target: $v °C → sent 18${v.toRadixString(16).toUpperCase().padLeft(2, '0')}',
+                        level: 'info',
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _BigParamControl(
+                    label: 'Edge Temp Target',
+                    icon: Icons.device_thermostat,
+                    color: _kOrange,
+                    value: _edgeTempTarget,
+                    unit: '°C',
+                    hint: '20–100 °C',
+                    min: 20,
+                    max: 100,
+                    step: 1,
+                    locked: locked,
+                    isSet: _edgeTempSet,
+                    onChanged: (v) {
+                      setState(() {
+                        _edgeTempTarget = v;
+                        _edgeTempSet = false;
+                      });
+                    },
+                    onSet: (v) {
+                      setState(() => _edgeTempSet = true);
+                      // Requires SerialService.sendEdgeTemp(int) — see
+                      // note at top of this file.
+                      _serial.sendEdgeTemp(v);
+                      _log(
+                        'SET Edge Temp Target: $v °C → sent 19${v.toRadixString(16).toUpperCase().padLeft(2, '0')}',
+                        level: 'info',
+                      );
+                    },
+                  ),
+                ),
+              ],
             ),
           ),
-          // Pump flow (Endovorus only) — 0–25 L/min
+
+          // ── Row 3: Pump Flow Rate (Endovorus only) — 0–250 L/min ──
           if (_isEndoMode(_mode)) ...[
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             const Divider(color: _kBorder, height: 1),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             Expanded(
               child: _BigParamControl(
                 label: 'Pump Flow Rate',
                 icon: Icons.water_drop_outlined,
                 color: _kOrange,
-                value: _pumpFlow.toInt(),
+                value: _pumpFlow,
                 unit: 'L/min',
-                hint: '0 – 25 L/min',
+                hint: '0–250 L/min',
                 min: 0,
-                max: 25,
+                max: 250,
                 step: 1,
                 locked: locked,
                 isSet: _flowSet,
                 onChanged: (v) {
                   setState(() {
-                    _pumpFlow = v.toDouble();
+                    _pumpFlow = v;
                     _flowSet = false; // changing value resets SET state
                   });
                 },
@@ -1324,7 +1236,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // CONTROL BUTTONS (Pump + Oven — same visual weight)
+  // CONTROL BUTTONS (Pump + Oven + optional Pause for Continuous mode)
   // ─────────────────────────────────────────────────────────────────────────
   Widget _buildControlButtons() {
     // Continuous:    pump SET → ON immediately; oven needs pump ON.
@@ -1361,10 +1273,10 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
 
     String pumpStatus;
     if (_isOvenOn) {
-      pumpStatus = 'Oven is active';
+      pumpStatus = _isPaused ? 'Oven is paused' : 'Oven is active';
     } else if (_isPumpOn) {
       pumpStatus = _isEndoMode(_mode)
-          ? 'Running at ${_pumpFlow.toStringAsFixed(1)} L/min'
+          ? 'Running at $_pumpFlow L/min'
           : 'Pump running';
     } else if (_pumpWaiting) {
       pumpStatus = 'Waiting for footswitch…';
@@ -1388,7 +1300,9 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
 
     String ovenStatus;
     if (_isOvenOn) {
-      ovenStatus = 'Ablation in progress';
+      ovenStatus = _isPaused
+          ? 'Paused — tap Resume to continue'
+          : 'Ablation in progress';
     } else if (_awaitingFootswitch) {
       ovenStatus = 'Waiting for footswitch…';
     } else if (_isFootswitchMode(_mode)) {
@@ -1412,6 +1326,8 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
       ovenDisabledHint = 'Start pump first';
     }
 
+    final showPause = _mode == 'Continuous';
+
     return Row(
       children: [
         // ── Pump ──
@@ -1426,7 +1342,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
             inactiveColor: setReady ? _kGreen : _kSubText,
             enabled: pumpEnabled,
             disabledHint: _isOvenOn
-                ? 'Stop oven first'
+                ? (_isPaused ? 'Resume/Stop oven first' : 'Stop oven first')
                 : _awaitingFootswitch
                 ? 'Oven footswitch armed'
                 : !setReady
@@ -1448,15 +1364,39 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
                 ? Icons.electrical_services_rounded
                 : Icons.microwave_outlined,
             active: _isOvenOn || _awaitingFootswitch,
-            activeColor: _awaitingFootswitch ? _kAmber : _kRed,
+            activeColor: _isPaused
+                ? _kAmber
+                : (_awaitingFootswitch ? _kAmber : _kRed),
             inactiveColor: _kNavy,
             enabled: ovenEnabled,
             disabledHint: !ovenEnabled ? ovenDisabledHint : null,
             onTap: _toggleOven,
             statusLine: ovenStatus,
-            pulseAnim: _isOvenOn || _awaitingFootswitch ? _pulseAnim : null,
+            pulseAnim: (_isOvenOn && !_isPaused) || _awaitingFootswitch
+                ? _pulseAnim
+                : null,
           ),
         ),
+        // ── Pause / Resume (Continuous mode only) ──
+        if (showPause) ...[
+          const SizedBox(width: 10),
+          Expanded(
+            child: _HardwareButton(
+              label: _isPaused ? 'RESUME OVEN' : 'PAUSE OVEN',
+              icon: _isPaused ? Icons.play_arrow_rounded : Icons.pause_rounded,
+              active: _isPaused,
+              activeColor: _kAmber,
+              inactiveColor: _kBlue,
+              enabled: _isOvenOn,
+              disabledHint: !_isOvenOn ? 'Start oven first' : null,
+              onTap: _togglePause,
+              statusLine: _isPaused
+                  ? 'Paused at ${_fmt(_elapsedSeconds)}'
+                  : (_isOvenOn ? 'Tap to pause ablation' : 'Oven not running'),
+              pulseAnim: _isPaused ? _pulseAnim : null,
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -1607,7 +1547,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
                 ),
               ),
               const Spacer(),
-              if (_isOvenOn)
+              if (_isOvenOn && !_isPaused)
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 7,
@@ -1621,6 +1561,25 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
                     'LIVE',
                     style: TextStyle(
                       color: _kGreen,
+                      fontSize: 9,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                )
+              else if (_isOvenOn && _isPaused)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 7,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: _kAmber.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: const Text(
+                    'PAUSED',
+                    style: TextStyle(
+                      color: _kAmber,
                       fontSize: 9,
                       fontWeight: FontWeight.w800,
                     ),
@@ -1667,7 +1626,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
           ),
           const SizedBox(width: 10),
           // Beep flash
-          if (_isOvenOn && !_isMuted && _beepFlash)
+          if (_isOvenOn && !_isPaused && !_isMuted && _beepFlash)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
@@ -1693,6 +1652,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
               ),
             ),
           const Spacer(),
+          // End Procedure — always available, regardless of pause state.
           OutlinedButton.icon(
             onPressed: _confirmEnd,
             icon: const Icon(
@@ -1723,7 +1683,10 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Big Parameter Control Widget
+// Big Parameter Control Widget — real Slider + drag + long-press step buttons.
+// Uniform sizing is used across every parameter (Power, Duration, Shaft
+// Temp, Edge Temp, Pump Flow) so the control/button footprint stays
+// consistent whether it's shown one-per-row or two-per-row.
 // ─────────────────────────────────────────────────────────────────────────────
 class _BigParamControl extends StatelessWidget {
   final String label, unit, hint;
@@ -1762,49 +1725,52 @@ class _BigParamControl extends StatelessWidget {
     final confirmedColor = isSet && !locked ? _kGreen : color;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
       children: [
         Row(
           children: [
-            Icon(icon, size: 14, color: locked ? _kSubText : color),
-            const SizedBox(width: 8),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w700,
-                color: locked ? _kSubText : _kNavy,
+            Icon(icon, size: 16, color: locked ? _kSubText : color),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: locked ? _kSubText : _kNavy,
+                ),
+                overflow: TextOverflow.ellipsis,
               ),
             ),
-            const Spacer(),
             // Value display badge — green border when SET is confirmed
             AnimatedContainer(
               duration: const Duration(milliseconds: 200),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
                 color: (locked ? _kSubText : color).withOpacity(0.1),
                 borderRadius: BorderRadius.circular(8),
-                border: isSet && !locked
-                    ? Border.all(color: _kGreen, width: 2)
-                    : null,
+                // border: isSet && !locked
+                //     ? Border.all(color: _kGreen, width: 2)
+                //     : null,
               ),
               child: Text(
                 '$value $unit',
                 style: TextStyle(
                   color: locked ? _kSubText : color,
-                  fontSize: 28,
+                  fontSize: 30,
                   fontWeight: FontWeight.w900,
                 ),
               ),
             ),
             // SET button — turns green with checkmark when confirmed
             if (onSet != null) ...[
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               GestureDetector(
                 onTap: locked ? null : () => onSet!(value),
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 200),
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
+                    horizontal: 10,
                     vertical: 10,
                   ),
                   decoration: BoxDecoration(
@@ -1829,10 +1795,10 @@ class _BigParamControl extends StatelessWidget {
                       if (isSet && !locked) ...[
                         const Icon(
                           Icons.check_rounded,
-                          size: 13,
+                          size: 15,
                           color: _kGreen,
                         ),
-                        const SizedBox(width: 4),
+                        const SizedBox(width: 3),
                       ],
                       Text(
                         'SET',
@@ -1850,34 +1816,58 @@ class _BigParamControl extends StatelessWidget {
             ],
           ],
         ),
-        const SizedBox(height: 14),
+        const SizedBox(height: 10),
         Row(
           children: [
-            // Decrease
+            // Decrease (tap = -step, long-press = auto-repeat)
             _BigStepBtn(
               icon: Icons.remove_rounded,
               color: color,
               enabled: !locked && value > min,
-              onTap: () => onChanged(value - step),
+              onStep: () => onChanged(math.max(min, value - step)),
             ),
-            // Progress bar
+            // Slider — drag to set value directly, snapped to `step`.
             Expanded(
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 14),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
                 child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: LinearProgressIndicator(
-                        value: pct,
-                        minHeight: 24,
-                        backgroundColor: Colors.grey.shade200,
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                          locked ? _kSubText.withOpacity(0.3) : color,
+                    SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: 22,
+                        activeTrackColor: locked
+                            ? _kSubText.withOpacity(0.3)
+                            : color,
+                        inactiveTrackColor: Colors.grey.shade200,
+                        thumbColor: locked ? _kSubText : color,
+                        overlayColor: color.withOpacity(0.15),
+                        thumbShape: const RoundSliderThumbShape(
+                          enabledThumbRadius: 14,
+                        ),
+                        trackShape: const RoundedRectSliderTrackShape(),
+                        overlayShape: const RoundSliderOverlayShape(
+                          overlayRadius: 22,
                         ),
                       ),
+                      child: Slider(
+                        value: value.toDouble().clamp(
+                          min.toDouble(),
+                          max.toDouble(),
+                        ),
+                        min: min.toDouble(),
+                        max: max.toDouble(),
+                        divisions: math.max(1, ((max - min) / step).round()),
+                        onChanged: locked
+                            ? null
+                            : (v) {
+                                // Snap to nearest step and report as int.
+                                final newVal =
+                                    ((v - min) / step).round() * step + min;
+                                onChanged(newVal.clamp(min, max));
+                              },
+                      ),
                     ),
-                    const SizedBox(height: 4),
                     Row(
                       children: [
                         Text(
@@ -1891,7 +1881,7 @@ class _BigParamControl extends StatelessWidget {
                         Text(
                           '${(pct * 100).toInt()}%',
                           style: TextStyle(
-                            fontSize: 10,
+                            fontSize: 11,
                             color: locked ? _kSubText : color,
                             fontWeight: FontWeight.w600,
                           ),
@@ -1902,12 +1892,12 @@ class _BigParamControl extends StatelessWidget {
                 ),
               ),
             ),
-            // Increase
+            // Increase (tap = +step, long-press = auto-repeat)
             _BigStepBtn(
               icon: Icons.add_rounded,
               color: color,
               enabled: !locked && value < max,
-              onTap: () => onChanged(value + step),
+              onStep: () => onChanged(math.min(max, value + step)),
             ),
           ],
         ),
@@ -1916,36 +1906,69 @@ class _BigParamControl extends StatelessWidget {
   }
 }
 
-class _BigStepBtn extends StatelessWidget {
+/// Step button that supports a single tap (one step) and a long-press
+/// that auto-repeats the step at a fixed interval until released.
+class _BigStepBtn extends StatefulWidget {
   final IconData icon;
   final Color color;
   final bool enabled;
-  final VoidCallback onTap;
+  final VoidCallback onStep;
   const _BigStepBtn({
     required this.icon,
     required this.color,
     required this.enabled,
-    required this.onTap,
+    required this.onStep,
   });
+
+  @override
+  State<_BigStepBtn> createState() => _BigStepBtnState();
+}
+
+class _BigStepBtnState extends State<_BigStepBtn> {
+  Timer? _repeatTimer;
+
+  void _startAutoRepeat() {
+    _stopAutoRepeat();
+    // Small initial delay then repeat quickly while held.
+    _repeatTimer = Timer.periodic(const Duration(milliseconds: 110), (_) {
+      widget.onStep();
+    });
+  }
+
+  void _stopAutoRepeat() {
+    _repeatTimer?.cancel();
+    _repeatTimer = null;
+  }
+
+  @override
+  void dispose() {
+    _stopAutoRepeat();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: enabled ? onTap : null,
+      onTap: widget.enabled ? widget.onStep : null,
+      onLongPressStart: widget.enabled ? (_) => _startAutoRepeat() : null,
+      onLongPressEnd: widget.enabled ? (_) => _stopAutoRepeat() : null,
+      onLongPressCancel: widget.enabled ? _stopAutoRepeat : null,
       child: Container(
-        width: 60,
-        height: 60,
+        width: 52,
+        height: 52,
         decoration: BoxDecoration(
-          color: enabled ? color.withOpacity(0.1) : Colors.grey.shade100,
-          borderRadius: BorderRadius.circular(12),
+          color: widget.enabled
+              ? widget.color.withOpacity(0.1)
+              : Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(10),
           border: Border.all(
-            color: enabled ? color.withOpacity(0.25) : _kBorder,
+            color: widget.enabled ? widget.color.withOpacity(0.25) : _kBorder,
           ),
         ),
         child: Icon(
-          icon,
-          size: 30,
-          color: enabled ? color : _kSubText.withOpacity(0.4),
+          widget.icon,
+          size: 26,
+          color: widget.enabled ? widget.color : _kSubText.withOpacity(0.4),
         ),
       ),
     );
@@ -1953,7 +1976,7 @@ class _BigStepBtn extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hardware Button (Pump / Oven — same style)
+// Hardware Button (Pump / Oven / Pause — same style)
 // ─────────────────────────────────────────────────────────────────────────────
 class _HardwareButton extends StatelessWidget {
   final String label;
@@ -2399,7 +2422,7 @@ class _MetricCard extends StatelessWidget {
             Text(
               def.value,
               style: TextStyle(
-                fontSize: 48,
+                fontSize: 70,
                 fontWeight: FontWeight.w900,
                 color: def.color,
                 height: 1,
@@ -2412,7 +2435,7 @@ class _MetricCard extends StatelessWidget {
                 child: Text(
                   def.unit,
                   style: const TextStyle(
-                    fontSize: 20,
+                    fontSize: 25,
                     fontWeight: FontWeight.w600,
                     color: _kSubText,
                   ),

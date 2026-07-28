@@ -1,10 +1,13 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:raddmed/Models/ProcedureModel.dart';
 import 'package:raddmed/Models/PatientModel.dart';
+import 'package:raddmed/Models/HospitalModel.dart';
 import 'package:raddmed/Repositories/PatientRepository.dart';
+import 'package:raddmed/Repositories/HospitalRepository.dart';
 import 'package:intl/intl.dart';
 
 class PdfReportService {
@@ -23,19 +26,30 @@ class PdfReportService {
       );
     } catch (_) {}
 
-    // Parse logs
+    // Fetch hospital profile (for authorized-by name + signature image)
+    HospitalModel? hospital;
+    try {
+      // Hospital ID is keyed by the physician's user ID stored on the procedure.
+      final allBoxKeys = HospitalRepository.getAllHospitalIds();
+      if (allBoxKeys.isNotEmpty) {
+        hospital = HospitalRepository.getHospital(allBoxKeys.first);
+      }
+    } catch (_) {}
+
+    // Parse logs — used only for extracting set-power; NOT printed in the report
     List<Map<String, dynamic>> logs = [];
-    if (procedure.procedureLog != null && procedure.procedureLog!.isNotEmpty) {
-      try {
-        final decoded = jsonDecode(procedure.procedureLog!) as List;
+    try {
+      final rawLog = procedure.procedureLog;
+      if (rawLog != null && rawLog.isNotEmpty) {
+        final decoded = jsonDecode(rawLog) as List;
         logs = decoded.map((e) => e as Map<String, dynamic>).toList();
-      } catch (_) {}
-    }
+      }
+    } catch (_) {}
 
     // Format dates
     final startStr = _formatDate(procedure.startTime);
-    final endStr = procedure.endTime != null
-        ? _formatDate(procedure.endTime!)
+    final endStr = procedure.endTime.isNotEmpty
+        ? _formatDate(procedure.endTime)
         : 'N/A';
 
     // Parse set power from logs
@@ -48,28 +62,35 @@ class PdfReportService {
       }
     }
 
+    // Load signature image from the saved file path (gracefully optional).
+    // If the path is empty, the file was deleted, or reading fails for any
+    // reason, signatureImg stays null and the footer block is simply omitted.
+    pw.MemoryImage? signatureImg;
+    final sigPath = hospital?.signaturePath ?? '';
+    if (sigPath.isNotEmpty) {
+      try {
+        final sigFile = File(sigPath);
+        if (sigFile.existsSync()) {
+          final bytes = await sigFile.readAsBytes();
+          if (bytes.isNotEmpty) signatureImg = pw.MemoryImage(bytes);
+        }
+      } catch (_) {
+        // Unreadable — skip signature silently.
+      }
+    }
+    final authorizedBy = hospital?.authorizedBy ?? '';
+
     doc.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
         margin: const pw.EdgeInsets.all(32),
         header: (context) => _buildHeader(procedure),
-        footer: (context) => _buildFooter(context),
+        footer: (context) => _buildFooter(context, signatureImg, authorizedBy),
         build: (context) => [
           pw.SizedBox(height: 20),
           _buildPatientInfo(procedure, patient),
           pw.SizedBox(height: 20),
           _buildProcedureInfo(procedure, startStr, endStr, setPower),
-          pw.SizedBox(height: 30),
-          pw.Text(
-            'System Logs & Events',
-            style: pw.TextStyle(
-              fontSize: 14,
-              fontWeight: pw.FontWeight.bold,
-              color: PdfColors.blueGrey800,
-            ),
-          ),
-          pw.SizedBox(height: 10),
-          _buildLogTable(logs),
         ],
       ),
     );
@@ -130,13 +151,66 @@ class PdfReportService {
     );
   }
 
-  static pw.Widget _buildFooter(pw.Context context) {
+  /// Footer: page number on the left, signature + authorized-by name on the
+  /// right (only shown when a signature image or name is available).
+  static pw.Widget _buildFooter(
+    pw.Context context,
+    pw.MemoryImage? signatureImg,
+    String authorizedBy,
+  ) {
+    final hasSignature = signatureImg != null || authorizedBy.isNotEmpty;
+
     return pw.Container(
-      alignment: pw.Alignment.centerRight,
       margin: const pw.EdgeInsets.only(top: 10),
-      child: pw.Text(
-        'Page ${context.pageNumber} of ${context.pagesCount}',
-        style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey500),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.end,
+        children: [
+          // Page number — left side
+          pw.Text(
+            'Page ${context.pageNumber} of ${context.pagesCount}',
+            style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey500),
+          ),
+          pw.Spacer(),
+          // Signature block — right side
+          if (hasSignature)
+            pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.center,
+              mainAxisSize: pw.MainAxisSize.min,
+              children: [
+                if (signatureImg != null)
+                  pw.Container(
+                    width: 140,
+                    height: 50,
+                    child: pw.Image(signatureImg, fit: pw.BoxFit.contain),
+                  ),
+                pw.Container(
+                  width: 140,
+                  child: pw.Divider(color: PdfColors.grey500, thickness: 0.5),
+                ),
+                if (authorizedBy.isNotEmpty) ...[
+                  pw.SizedBox(height: 3),
+                  pw.Text(
+                    authorizedBy,
+                    style: pw.TextStyle(
+                      fontSize: 10,
+                      fontWeight: pw.FontWeight.bold,
+                      color: PdfColors.grey800,
+                    ),
+                    textAlign: pw.TextAlign.center,
+                  ),
+                ],
+                pw.SizedBox(height: 2),
+                pw.Text(
+                  'Authorized Signatory',
+                  style: const pw.TextStyle(
+                    fontSize: 8,
+                    color: PdfColors.grey500,
+                  ),
+                  textAlign: pw.TextAlign.center,
+                ),
+              ],
+            ),
+        ],
       ),
     );
   }
@@ -276,44 +350,6 @@ class PdfReportService {
           ),
         ],
       ),
-    );
-  }
-
-  static pw.Widget _buildLogTable(List<Map<String, dynamic>> logs) {
-    if (logs.isEmpty) {
-      return pw.Text(
-        'No logs recorded for this procedure.',
-        style: pw.TextStyle(
-          fontSize: 10,
-          color: PdfColors.grey600,
-          fontStyle: pw.FontStyle.italic,
-        ),
-      );
-    }
-
-    return pw.TableHelper.fromTextArray(
-      context: null,
-      cellAlignment: pw.Alignment.centerLeft,
-      headerDecoration: const pw.BoxDecoration(color: PdfColors.grey200),
-      headerStyle: pw.TextStyle(
-        fontSize: 10,
-        fontWeight: pw.FontWeight.bold,
-        color: PdfColors.grey800,
-      ),
-      cellStyle: const pw.TextStyle(fontSize: 9),
-      columnWidths: {
-        0: const pw.FixedColumnWidth(80),
-        1: const pw.FixedColumnWidth(60),
-        2: const pw.FlexColumnWidth(),
-      },
-      headers: ['Time', 'Level', 'Message'],
-      data: logs.map((log) {
-        return [
-          log['time']?.toString() ?? '',
-          (log['lvl']?.toString() ?? '').toUpperCase(),
-          log['msg']?.toString() ?? '',
-        ];
-      }).toList(),
     );
   }
 

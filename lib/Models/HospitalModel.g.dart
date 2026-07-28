@@ -22,14 +22,18 @@ class HospitalModelAdapter extends TypeAdapter<HospitalModel> {
       address: fields[2] as String,
       phone: fields[3] as String,
       website: fields[4] as String,
-      logo: fields[5] as Uint8List?,
+      logo: (fields[5] as List?)?.cast<int>(),
+      authorizedBy: fields[6] as String? ?? '',
+      // field 7 used to be Uint8List? in the old schema — if we read bytes
+      // here from a legacy record, we simply ignore them and start fresh.
+      signaturePath: fields[7] is String ? fields[7] as String : '',
     );
   }
 
   @override
   void write(BinaryWriter writer, HospitalModel obj) {
     writer
-      ..writeByte(6)
+      ..writeByte(8)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -41,7 +45,11 @@ class HospitalModelAdapter extends TypeAdapter<HospitalModel> {
       ..writeByte(4)
       ..write(obj.website)
       ..writeByte(5)
-      ..write(obj.logo);
+      ..write(obj.logo)
+      ..writeByte(6)
+      ..write(obj.authorizedBy)
+      ..writeByte(7)
+      ..write(obj.signaturePath);
   }
 
   @override

@@ -327,47 +327,47 @@ class _ProcedureHistoryScreenState extends State<ProcedureHistoryScreen> {
         ),
         const SizedBox(width: 12),
         // ── Export All button ─────────────────────────────────────────────────
-        Tooltip(
-          message: 'Export all visible records to Excel',
-          child: GestureDetector(
-            onTap: _filtered.isNotEmpty ? _exportAll : null,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              height: 44,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              decoration: BoxDecoration(
-                color: _filtered.isNotEmpty
-                    ? _kGreen.withOpacity(0.1)
-                    : _kBorder.withOpacity(0.5),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(
-                  color: _filtered.isNotEmpty
-                      ? _kGreen.withOpacity(0.35)
-                      : _kBorder,
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.table_chart_rounded,
-                    size: 16,
-                    color: _filtered.isNotEmpty ? _kGreen : _kSubText,
-                  ),
-                  const SizedBox(width: 7),
-                  Text(
-                    'Export All',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: _filtered.isNotEmpty ? _kGreen : _kSubText,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
+        // Tooltip(
+        //   message: 'Export all visible records to Excel',
+        //   child: GestureDetector(
+        //     onTap: _filtered.isNotEmpty ? _exportAll : null,
+        //     child: AnimatedContainer(
+        //       duration: const Duration(milliseconds: 150),
+        //       height: 44,
+        //       padding: const EdgeInsets.symmetric(horizontal: 16),
+        //       decoration: BoxDecoration(
+        //         color: _filtered.isNotEmpty
+        //             ? _kGreen.withOpacity(0.1)
+        //             : _kBorder.withOpacity(0.5),
+        //         borderRadius: BorderRadius.circular(10),
+        //         border: Border.all(
+        //           color: _filtered.isNotEmpty
+        //               ? _kGreen.withOpacity(0.35)
+        //               : _kBorder,
+        //         ),
+        //       ),
+        //       child: Row(
+        //         mainAxisSize: MainAxisSize.min,
+        //         children: [
+        //           Icon(
+        //             Icons.table_chart_rounded,
+        //             size: 16,
+        //             color: _filtered.isNotEmpty ? _kGreen : _kSubText,
+        //           ),
+        //           const SizedBox(width: 7),
+        //           Text(
+        //             'Export All',
+        //             style: TextStyle(
+        //               fontSize: 12,
+        //               fontWeight: FontWeight.w700,
+        //               color: _filtered.isNotEmpty ? _kGreen : _kSubText,
+        //             ),
+        //           ),
+        //         ],
+        //       ),
+        //     ),
+        //   ),
+        // ),
         const SizedBox(width: 8),
         // ── Refresh ───────────────────────────────────────────────────────────
         Tooltip(
@@ -1053,6 +1053,7 @@ class _ProcedureRowState extends State<_ProcedureRow> {
                 ),
               ),
               // Physician
+              SizedBox(width: 10),
               Expanded(
                 flex: 3,
                 child: Text(
@@ -1074,7 +1075,7 @@ class _ProcedureRowState extends State<_ProcedureRow> {
               ),
               // Status
               Expanded(
-                flex: 2,
+                flex: 1,
                 child: Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 8,
@@ -1095,6 +1096,7 @@ class _ProcedureRowState extends State<_ProcedureRow> {
                 ),
               ),
               // Actions
+              SizedBox(width: 100),
               Expanded(
                 flex: 1,
                 child: Row(
@@ -1111,18 +1113,18 @@ class _ProcedureRowState extends State<_ProcedureRow> {
                         ),
                       ),
                     ),
-                    const SizedBox(width: 10),
-                    GestureDetector(
-                      onTap: widget.onExport,
-                      child: const Tooltip(
-                        message: 'Export to Excel',
-                        child: Icon(
-                          Icons.download_rounded,
-                          size: 16,
-                          color: _kGreen,
-                        ),
-                      ),
-                    ),
+                    // const SizedBox(width: 10),
+                    // GestureDetector(
+                    //   onTap: widget.onExport,
+                    //   child: const Tooltip(
+                    //     message: 'Export to Excel',
+                    //     child: Icon(
+                    //       Icons.download_rounded,
+                    //       size: 16,
+                    //       color: _kGreen,
+                    //     ),
+                    //   ),
+                    // ),
                   ],
                 ),
               ),

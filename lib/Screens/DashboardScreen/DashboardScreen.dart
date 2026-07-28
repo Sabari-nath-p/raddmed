@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:raddmed/Models/Enums/UserType.dart';
 import 'package:raddmed/Screens/ProcedureHistoryScreen/ProcedureHistoryScreen.dart';
@@ -559,10 +561,7 @@ class _QuickActionsCard extends StatelessWidget {
   const _QuickActionsCard({required this.currentUser});
 
   void _showInfusionDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (_) => _InfusionDialog(),
-    );
+    showDialog(context: context, builder: (_) => _InfusionDialog());
   }
 
   @override
@@ -681,13 +680,17 @@ class _InfusionDialog extends StatefulWidget {
 
 class _InfusionDialogState extends State<_InfusionDialog> {
   final _serial = SerialService.instance;
-  int _flowRate = 5; // 0–250 L/min
+  int _flowRate = 0; // 0–250 Liter/min
   bool _isRunning = false;
+
+  Timer? _repeatTimer;
 
   void _toggleInfusion() {
     setState(() => _isRunning = !_isRunning);
     if (_isRunning) {
-      _serial.sendInfusionFlowRate(_flowRate.toDouble()); // ensure flow rate is set before starting
+      _serial.sendInfusionFlowRate(
+        _flowRate.toDouble(),
+      ); // ensure flow rate is set before starting
       _serial.sendPump(true);
     } else {
       _serial.sendPump(false);
@@ -698,14 +701,49 @@ class _InfusionDialogState extends State<_InfusionDialog> {
     if (_isRunning) {
       _serial.sendPump(false);
     }
+    _repeatTimer?.cancel();
     Navigator.of(context).pop();
+  }
+
+  void _setFlowRate(int value) {
+    final clamped = value.clamp(0, 250);
+    if (clamped == _flowRate) return;
+    setState(() => _flowRate = clamped);
+
+    _serial.sendInfusionFlowRate(_flowRate.toDouble());
+  }
+
+  void _step(int delta) {
+    _setFlowRate(_flowRate + delta);
+  }
+
+  // ── Long-press continuous stepping ─────────────────────────────────────
+  void _startRepeating(int delta) {
+    _step(delta); // immediate single-tap response
+    _repeatTimer?.cancel();
+    // Small initial delay before rapid-fire kicks in, like most native steppers.
+    _repeatTimer = Timer(const Duration(milliseconds: 400), () {
+      _repeatTimer = Timer.periodic(const Duration(milliseconds: 80), (_) {
+        _step(delta);
+      });
+    });
+  }
+
+  void _stopRepeating() {
+    _repeatTimer?.cancel();
+    _repeatTimer = null;
+  }
+
+  @override
+  void dispose() {
+    _repeatTimer?.cancel();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     const cyan = Color(0xFF0891B2);
     const navyDark = Color(0xFF0D1B2A);
-    const bg = Color(0xFFF0F2F5);
     const borderCol = Color(0xFFE4E8EF);
     const subText = Color(0xFF8A96A8);
     const green = Color(0xFF00C896);
@@ -767,10 +805,7 @@ class _InfusionDialogState extends State<_InfusionDialog> {
                       ),
                       Text(
                         'Quick infusion pump control',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: subText,
-                        ),
+                        style: TextStyle(fontSize: 12, color: subText),
                       ),
                     ],
                   ),
@@ -863,7 +898,7 @@ class _InfusionDialogState extends State<_InfusionDialog> {
                         const Padding(
                           padding: EdgeInsets.only(bottom: 10),
                           child: Text(
-                            'L/min',
+                            'Liter/min',
                             style: TextStyle(
                               fontSize: 22,
                               fontWeight: FontWeight.w600,
@@ -880,15 +915,15 @@ class _InfusionDialogState extends State<_InfusionDialog> {
                   // +/- controls
                   Row(
                     children: [
-                      // Minus
+                      // Minus (tap = -1, long-press = continuous)
                       Expanded(
                         child: GestureDetector(
-                          onTap: _flowRate > 0
-                              ? () {
-                                  setState(() => _flowRate--);
-                                  _serial.sendInfusionFlowRate(_flowRate.toDouble());
-                                }
+                          onTap: _flowRate > 0 ? () => _step(-1) : null,
+                          onLongPressStart: _flowRate > 0
+                              ? (_) => _startRepeating(-1)
                               : null,
+                          onLongPressEnd: (_) => _stopRepeating(),
+                          onLongPressUp: _stopRepeating,
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 150),
                             height: 56,
@@ -906,7 +941,9 @@ class _InfusionDialogState extends State<_InfusionDialog> {
                             child: Icon(
                               Icons.remove_rounded,
                               size: 28,
-                              color: _flowRate > 0 ? cyan : subText.withOpacity(0.4),
+                              color: _flowRate > 0
+                                  ? cyan
+                                  : subText.withOpacity(0.4),
                             ),
                           ),
                         ),
@@ -914,7 +951,7 @@ class _InfusionDialogState extends State<_InfusionDialog> {
                       const SizedBox(width: 12),
                       // Range label
                       Text(
-                        '0 – 250 L/min',
+                        '0 – 250 Liter/min',
                         style: TextStyle(
                           fontSize: 12,
                           color: subText,
@@ -922,15 +959,15 @@ class _InfusionDialogState extends State<_InfusionDialog> {
                         ),
                       ),
                       const SizedBox(width: 12),
-                      // Plus
+                      // Plus (tap = +1, long-press = continuous)
                       Expanded(
                         child: GestureDetector(
-                          onTap: _flowRate < 250
-                              ? () {
-                                  setState(() => _flowRate++);
-                                  _serial.sendInfusionFlowRate(_flowRate.toDouble());
-                                }
+                          onTap: _flowRate < 250 ? () => _step(1) : null,
+                          onLongPressStart: _flowRate < 250
+                              ? (_) => _startRepeating(1)
                               : null,
+                          onLongPressEnd: (_) => _stopRepeating(),
+                          onLongPressUp: _stopRepeating,
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 150),
                             height: 56,
@@ -948,8 +985,9 @@ class _InfusionDialogState extends State<_InfusionDialog> {
                             child: Icon(
                               Icons.add_rounded,
                               size: 28,
-                              color:
-                                  _flowRate < 250 ? cyan : subText.withOpacity(0.4),
+                              color: _flowRate < 250
+                                  ? cyan
+                                  : subText.withOpacity(0.4),
                             ),
                           ),
                         ),
@@ -957,19 +995,30 @@ class _InfusionDialogState extends State<_InfusionDialog> {
                     ],
                   ),
 
-                  // Progress bar
-                  const SizedBox(height: 16),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: LinearProgressIndicator(
-                      value: _flowRate / 15.0,
-                      minHeight: 8,
-                      backgroundColor: Colors.grey.shade200,
-                      valueColor: const AlwaysStoppedAnimation<Color>(cyan),
+                  // Slider (0 – 250, draggable)
+                  const SizedBox(height: 8),
+                  SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      trackHeight: 6,
+                      activeTrackColor: cyan,
+                      inactiveTrackColor: Colors.grey.shade200,
+                      thumbColor: cyan,
+                      overlayColor: cyan.withOpacity(0.15),
+                      thumbShape: const RoundSliderThumbShape(
+                        enabledThumbRadius: 9,
+                      ),
+                    ),
+                    child: Slider(
+                      value: _flowRate.toDouble(),
+                      min: 0,
+                      max: 250,
+                      divisions: 250,
+                      label: '$_flowRate Liter/min',
+                      onChanged: (value) => _setFlowRate(value.round()),
                     ),
                   ),
 
-                  const SizedBox(height: 28),
+                  const SizedBox(height: 20),
 
                   // Start / Stop button
                   SizedBox(

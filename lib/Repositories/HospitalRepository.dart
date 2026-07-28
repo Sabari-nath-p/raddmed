@@ -22,6 +22,11 @@ class HospitalRepository {
     return box.get(id);
   }
 
+  static List<String> getAllHospitalIds() {
+    final box = Hive.box<HospitalModel>(boxName);
+    return box.keys.cast<String>().toList();
+  }
+
   static Future<void> clearAllHospitals() async {
     final box = Hive.box<HospitalModel>(boxName);
     await box.clear();

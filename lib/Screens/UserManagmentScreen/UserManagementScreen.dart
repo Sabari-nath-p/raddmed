@@ -28,29 +28,7 @@ class UserManagementScreen extends StatefulWidget {
 
 class _UserManagementScreenState extends State<UserManagementScreen> {
   // Mock User Data
-  final List<SystemUser> _users = [
-    SystemUser(
-      id: '1',
-      name: 'Dr. John Smith',
-      empId: 'EMP-001',
-      userId: 'jsmith_admin',
-      accessAreas: ['Liver', 'Kidney', 'Lung', 'Bone', 'Heart'],
-    ),
-    SystemUser(
-      id: '2',
-      name: 'Dr. Sarah Lee',
-      empId: 'EMP-042',
-      userId: 'slee_surgery',
-      accessAreas: ['Liver', 'Kidney'],
-    ),
-    SystemUser(
-      id: '3',
-      name: 'Mark Johnson',
-      empId: 'EMP-112',
-      userId: 'mjohnson_tech',
-      accessAreas: ['System Settings'],
-    ),
-  ];
+  final List<SystemUser> _users = [];
 
   void _deleteUser(String id) {
     showDialog(
@@ -147,7 +125,10 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
                 CircleAvatar(
                   backgroundColor: const Color(0xFFF8F9FA),
                   radius: 22,
-                  child: Icon(Icons.person_outline, color: Colors.grey.shade700),
+                  child: Icon(
+                    Icons.person_outline,
+                    color: Colors.grey.shade700,
+                  ),
                 ),
                 const SizedBox(width: 16),
                 Column(
@@ -163,7 +144,10 @@ class _UserManagementScreenState extends State<UserManagementScreen> {
                     ),
                     Text(
                       'System Management',
-                      style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
+                      style: TextStyle(
+                        color: Colors.grey.shade500,
+                        fontSize: 12,
+                      ),
                     ),
                   ],
                 ),

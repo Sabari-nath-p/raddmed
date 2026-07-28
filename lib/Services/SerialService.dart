@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:developer';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter_libserialport/flutter_libserialport.dart';
@@ -29,6 +31,7 @@ import 'package:flutter_libserialport/flutter_libserialport.dart';
 /// | 23   | `23{DATA}\n` | Edge temperature  (×10)              |
 /// | 24   | `24{DATA}\n` | Power           (×10)              |
 /// | 25   | `25\n`       | Footswitch activated                 |
+/// |26    | 26{DATA}\n | Endovonuse Pumb on          (×10)              |
 class SerialService {
   // ── Singleton ──────────────────────────────────────────────────────────────
   SerialService._();
@@ -190,8 +193,11 @@ class SerialService {
   // ── Send Command ───────────────────────────────────────────────────────────
   /// Sends a command string to the device.
   /// Always prints to debug console regardless of connection state.
-  bool send(String command) {
-    print('Serial Send: $command'); // Always visible in debug console
+  bool send(String cmd) {
+    log("send : $cmd");
+    var command = hexToNumber(cmd).toString();
+    log("send  HEX: $command");
+
     if (_port == null || !_port!.isOpen) return false;
     try {
       final bytes = Uint8List.fromList(command.codeUnits);
@@ -238,15 +244,17 @@ class SerialService {
   /// e.g. 1.0 L/min → 10 → '170A'
   ///      5.0 L/min → 50 → '1732'
   bool sendPumpFlowRate(double rateL) {
-    final raw = (rateL * 10).round();
+    final raw = (rateL).round();
     return send('17${_toHex(raw)}');
   }
 
   /// Send `18{HEX2}` — set infusion flow rate (value in L/min × 10, encoded as hex)
   /// e.g. 1.0 L/min → 10 → '180A'
   bool sendInfusionFlowRate(double rateL) {
-    final raw = (rateL * 10).round();
+    final raw = (rateL).round();
+    // decimal value of 18 is 24
     return send('18${_toHex(raw)}');
+    // return send('24${raw}');
   }
 
   // ── Incoming Data Parser ───────────────────────────────────────────────────
@@ -265,6 +273,7 @@ class SerialService {
       _buffer.write(content.substring(nlIdx + 1));
 
       if (line.isEmpty) continue;
+      log("GET : $line");
       _parseLine(line);
     }
   }
@@ -328,6 +337,14 @@ class SerialService {
     _statusCtrl.close();
     _dataCtrl.close();
   }
+
+  void sendShaftTemp(int v) {
+    send("27${_toHex(v)}");
+  }
+
+  void sendEdgeTemp(int v) {
+    send("28${_toHex(v)}");
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -365,4 +382,26 @@ class SerialConnectionStatus {
     this.portName,
     this.error,
   });
+}
+
+// String hexToString(String hex) {
+//   // Strip common prefixes/whitespace, just in case
+//   final cleanHex = hex.replaceAll(RegExp(r'\s+'), '').replaceAll('0x', '');
+
+//   if (cleanHex.length % 2 != 0) {
+//     throw FormatException('Invalid hex string: odd length');
+//   }
+
+//   final bytes = <int>[];
+//   for (int i = 0; i < cleanHex.length; i += 2) {
+//     final byteHex = cleanHex.substring(i, i + 2);
+//     bytes.add(int.parse(byteHex, radix: 16));
+//   }
+
+//   return utf8.decode(bytes);
+// }
+
+int hexToNumber(String hex) {
+  final cleanHex = hex.trim().replaceAll('0x', '').replaceAll('0X', '');
+  return int.parse(cleanHex, radix: 16);
 }

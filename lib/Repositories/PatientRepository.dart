@@ -13,24 +13,7 @@ class PatientRepository {
     }
 
     final box = Hive.box<PatientModel>(boxName);
-    if (box.isEmpty) {
-      debugPrint('Seeding default patients...');
-      await addPatient(
-        PatientModel(
-          id: '1',
-          patientId: '1',
-          name: 'Robert Johnson',
-          contactNumber: '+1 987 654 3210',
-          consultingDoctor: 'Dr. John Smith',
-          diagnosisArea: 'LIVER',
-          gender: 'Male',
-          age: '58',
-          address: '123 Medical Street, New York, NY 10001, USA',
-          note: 'Patient responding well to treatment. Continue monitoring.',
-          lastProcedureDate: '20 May 2024',
-        ),
-      );
-    }
+    if (box.isEmpty) {}
   }
 
   static Future<void> addPatient(PatientModel patient) async {

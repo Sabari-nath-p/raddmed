@@ -1,5 +1,8 @@
-import 'package:flutter/material.dart';
+import 'dart:io';
 import 'dart:typed_data';
+import 'package:file_selector/file_selector.dart';
+import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:raddmed/Models/UserModel.dart';
 import 'package:raddmed/Models/HospitalModel.dart';
 import 'package:raddmed/Models/Enums/UserType.dart';
@@ -40,7 +43,14 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
   final _addressCtrl = TextEditingController();
   final _phoneCtrl = TextEditingController();
   final _websiteCtrl = TextEditingController();
+  final _authorizedByCtrl = TextEditingController();
   Uint8List? _hospitalLogo;
+  // Path to the signature file in the secure app-support directory.
+  // Empty string = no signature configured.
+  String _signaturePath = '';
+  // In-memory preview bytes — loaded from _signaturePath at startup, or
+  // set immediately after the user picks a new file. Never stored in Hive.
+  Uint8List? _signaturePreview;
   bool _isSaving = false;
 
   // ── Staff list ─────────────────────────────────────────────────────────────
@@ -60,6 +70,7 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
     _addressCtrl.dispose();
     _phoneCtrl.dispose();
     _websiteCtrl.dispose();
+    _authorizedByCtrl.dispose();
     super.dispose();
   }
 
@@ -75,7 +86,19 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
       _addressCtrl.text = h.address;
       _phoneCtrl.text = h.phone;
       _websiteCtrl.text = h.website;
-      _hospitalLogo = h.logo;
+      _hospitalLogo = h.logo != null ? Uint8List.fromList(h.logo!) : null;
+      _authorizedByCtrl.text = h.authorizedBy;
+      _signaturePath = h.signaturePath;
+      // Load preview bytes from the saved file path (best-effort).
+      if (_signaturePath.isNotEmpty) {
+        try {
+          final f = File(_signaturePath);
+          if (f.existsSync()) _signaturePreview = f.readAsBytesSync();
+        } catch (_) {
+          // File missing or unreadable — preview stays null, path reset.
+          _signaturePath = '';
+        }
+      }
     }
   }
 
@@ -104,11 +127,72 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
         phone: _phoneCtrl.text.trim(),
         website: _websiteCtrl.text.trim(),
         logo: _hospitalLogo,
+        authorizedBy: _authorizedByCtrl.text.trim(),
+        signaturePath: _signaturePath,
       ),
     );
     if (!mounted) return;
     setState(() => _isSaving = false);
     Navigator.pop(context);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // SIGNATURE IMAGE PICKER
+  // Saves the picked file to getApplicationSupportDirectory()/signatures/ —
+  // a private, OS-managed directory that persists across launches. Only the
+  // path is stored in Hive; raw bytes are never persisted there.
+  // ─────────────────────────────────────────────────────────────────────────
+  Future<void> _pickSignatureImage() async {
+    const typeGroup = XTypeGroup(
+      label: 'Images',
+      extensions: ['png', 'jpg', 'jpeg'],
+    );
+    final xFile = await openFile(acceptedTypeGroups: [typeGroup]);
+    if (xFile == null) return; // user cancelled
+
+    Uint8List bytes;
+    try {
+      bytes = await xFile.readAsBytes();
+    } catch (e) {
+      // Cannot read the selected file — silently abort.
+      return;
+    }
+
+    // Save a copy into the app-support directory (secure, persistent).
+    String savedPath = '';
+    try {
+      final supportDir = await getApplicationSupportDirectory();
+      final sigDir = Directory('${supportDir.path}/signatures');
+      if (!sigDir.existsSync()) sigDir.createSync(recursive: true);
+      savedPath =
+          '${sigDir.path}/signature_${widget.currentUser.userid}.png';
+      await File(savedPath).writeAsBytes(bytes, flush: true);
+    } catch (e) {
+      // Disk write failed — we still keep the bytes for the current session
+      // but won't persist the path across restarts.
+      savedPath = '';
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _signaturePath = savedPath;
+      _signaturePreview = bytes;
+    });
+  }
+
+  // Clears the signature — deletes the saved file if it exists.
+  Future<void> _removeSignature() async {
+    if (_signaturePath.isNotEmpty) {
+      try {
+        final f = File(_signaturePath);
+        if (f.existsSync()) await f.delete();
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    setState(() {
+      _signaturePath = '';
+      _signaturePreview = null;
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -317,6 +401,121 @@ class _AdminSettingsScreenState extends State<AdminSettingsScreen> {
                   controller: _websiteCtrl,
                   icon: Icons.language_outlined,
                   keyboardType: TextInputType.url,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+          // ── Signature & Authorization ──────────────────────────────────
+          _SectionCard(
+            icon: Icons.draw_rounded,
+            title: 'Signature & Authorization',
+            subtitle: 'Authorized person name and signature for PDF reports',
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Left: Authorized By field
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _Field(
+                        label: 'Authorized By',
+                        hint: 'e.g. Dr. John Smith',
+                        controller: _authorizedByCtrl,
+                        icon: Icons.person_pin_outlined,
+                      ),
+                      const SizedBox(height: 12),
+                      const Text(
+                        'This name will appear as the authorized signatory on exported PDF reports.',
+                        style: TextStyle(fontSize: 11, color: _kSubText),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 28),
+                // Right: Signature image picker
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Signature Image',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF374151),
+                          letterSpacing: 0.2,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      GestureDetector(
+                        onTap: _pickSignatureImage,
+                        child: Container(
+                          height: 110,
+                          width: double.infinity,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFAFBFC),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: _signaturePreview != null
+                                  ? _kBlue.withOpacity(0.4)
+                                  : _kBorder,
+                              width: 1.5,
+                            ),
+                          ),
+                          child: _signaturePreview != null
+                              ? Padding(
+                                  padding: const EdgeInsets.all(8),
+                                  child: Image.memory(
+                                    _signaturePreview!,
+                                    fit: BoxFit.contain,
+                                  ),
+                                )
+                              : Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.upload_file_rounded,
+                                      size: 30,
+                                      color: _kSubText.withOpacity(0.5),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    const Text(
+                                      'Click to upload signature',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: _kSubText,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    const Text(
+                                      'PNG, JPG accepted',
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        color: _kSubText,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                        ),
+                      ),
+                      if (_signaturePreview != null) ...[
+                        const SizedBox(height: 8),
+                        GestureDetector(
+                          onTap: _removeSignature,
+                          child: const Text(
+                            'Remove signature',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: _kRed,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
               ],
             ),

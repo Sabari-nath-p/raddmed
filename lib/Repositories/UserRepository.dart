@@ -29,9 +29,9 @@ class UserRepository {
           password: 'rootpassword',
           userType: UserType.rootUser,
           accessInstruments: [
-            InstrumentAccess.liver,
-            InstrumentAccess.lung,
-            InstrumentAccess.kidney,
+            // InstrumentAccess.liver,
+            // InstrumentAccess.lung,
+            // InstrumentAccess.kidney,
           ],
           data: 'Super Root Account',
         ),

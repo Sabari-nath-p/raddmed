@@ -1,4 +1,3 @@
-import 'dart:typed_data';
 import 'package:hive/hive.dart';
 
 part 'HospitalModel.g.dart';
@@ -21,7 +20,15 @@ class HospitalModel extends HiveObject {
   final String website;
 
   @HiveField(5)
-  final Uint8List? logo;
+  final List<int>? logo;
+
+  @HiveField(6)
+  final String authorizedBy;
+
+  /// Absolute path to the signature image file saved in the app-support
+  /// directory. Empty string means no signature has been configured.
+  @HiveField(7)
+  final String signaturePath;
 
   HospitalModel({
     required this.id,
@@ -30,5 +37,7 @@ class HospitalModel extends HiveObject {
     required this.phone,
     required this.website,
     this.logo,
+    this.authorizedBy = '',
+    this.signaturePath = '',
   });
 }
