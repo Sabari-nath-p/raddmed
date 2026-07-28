@@ -1,7 +1,4 @@
 PODS:
-  - audioplayers_darwin (0.0.1):
-    - Flutter
-    - FlutterMacOS
   - file_selector_macos (0.0.1):
     - FlutterMacOS
   - flutter_libserialport (0.0.1):
@@ -13,7 +10,6 @@ PODS:
     - FlutterMacOS
 
 DEPENDENCIES:
-  - audioplayers_darwin (from `Flutter/ephemeral/.symlinks/plugins/audioplayers_darwin/darwin`)
   - file_selector_macos (from `Flutter/ephemeral/.symlinks/plugins/file_selector_macos/macos`)
   - flutter_libserialport (from `Flutter/ephemeral/.symlinks/plugins/flutter_libserialport/macos`)
   - FlutterMacOS (from `Flutter/ephemeral`)
@@ -24,8 +20,6 @@ SPEC REPOS:
     - libserialport
 
 EXTERNAL SOURCES:
-  audioplayers_darwin:
-    :path: Flutter/ephemeral/.symlinks/plugins/audioplayers_darwin/darwin
   file_selector_macos:
     :path: Flutter/ephemeral/.symlinks/plugins/file_selector_macos/macos
   flutter_libserialport:
@@ -36,7 +30,6 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral/.symlinks/plugins/printing/macos
 
 SPEC CHECKSUMS:
-  audioplayers_darwin: 835ced6edd4c9fc8ebb0a7cc9e294a91d99917d5
   file_selector_macos: 9e9e068e90ebee155097d00e89ae91edb2374db7
   flutter_libserialport: 2c523cb8d8203fc6d1b0da88190da31ac970eb93
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1

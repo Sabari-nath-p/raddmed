@@ -200,8 +200,11 @@ class SerialService {
 
     if (_port == null || !_port!.isOpen) return false;
     try {
-      final bytes = Uint8List.fromList(command.codeUnits);
+      final bytes = Uint8List.fromList("17".codeUnits);
       _port!.write(bytes);
+
+      final bytes1 = Uint8List.fromList("00".codeUnits);
+      _port!.write(bytes1);
       return true;
     } catch (_) {
       return false;

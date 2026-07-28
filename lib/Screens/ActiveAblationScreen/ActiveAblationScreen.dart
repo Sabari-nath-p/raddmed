@@ -1058,9 +1058,9 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
                     value: _powerWatts,
                     unit: 'W',
                     hint: '5–150 W',
-                    min: 5,
+                    min: 0,
                     max: 150,
-                    step: 1,
+                    step: 5,
                     locked: locked,
                     isSet: _powerSet,
                     onChanged: (v) {
@@ -1291,7 +1291,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     // ── Oven button ──
     String ovenLabel;
     if (_isOvenOn) {
-      ovenLabel = 'STOP OVEN';
+      ovenLabel = 'STOP';
     } else if (_awaitingFootswitch) {
       ovenLabel = 'CANCEL WAIT';
     } else {
@@ -1382,7 +1382,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
           const SizedBox(width: 10),
           Expanded(
             child: _HardwareButton(
-              label: _isPaused ? 'RESUME OVEN' : 'PAUSE OVEN',
+              label: _isPaused ? 'RESUME' : 'PAUSE',
               icon: _isPaused ? Icons.play_arrow_rounded : Icons.pause_rounded,
               active: _isPaused,
               activeColor: _kAmber,
