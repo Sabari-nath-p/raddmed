@@ -198,13 +198,12 @@ class SerialService {
     var command = hexToNumber(cmd).toString();
     log("send  HEX: $command");
 
+    var newcomd = hexToBytes(cmd);
+
     if (_port == null || !_port!.isOpen) return false;
     try {
-      final bytes = Uint8List.fromList("17".codeUnits);
-      _port!.write(bytes);
-
-      final bytes1 = Uint8List.fromList("00".codeUnits);
-      _port!.write(bytes1);
+      //final bytes = Uint8List.fromList();
+      _port!.write(newcomd);
       return true;
     } catch (_) {
       return false;
@@ -407,4 +406,21 @@ class SerialConnectionStatus {
 int hexToNumber(String hex) {
   final cleanHex = hex.trim().replaceAll('0x', '').replaceAll('0X', '');
   return int.parse(cleanHex, radix: 16);
+}
+
+Uint8List hexToBytes(String hex) {
+  // Remove spaces if present
+  hex = hex.replaceAll(' ', '').toUpperCase();
+
+  if (hex.length.isOdd) {
+    throw Exception('Hex string must have an even number of characters');
+  }
+
+  final bytes = <int>[];
+
+  for (int i = 0; i < hex.length; i += 2) {
+    bytes.add(int.parse(hex.substring(i, i + 2), radix: 16));
+  }
+
+  return Uint8List.fromList(bytes);
 }
