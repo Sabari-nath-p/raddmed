@@ -176,6 +176,12 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
 
   // ── Serial data handler ────────────────────────────────────────────────────
   void _onSerialData(SerialCommand cmd) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(cmd.value.toString() + "  " + cmd.type.name),
+        backgroundColor: Colors.red,
+      ),
+    );
     if (!mounted) return;
     setState(() {
       switch (cmd.type) {
@@ -351,17 +357,20 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     if (_isEndoMode(_mode)) {
       if (_isPumpOn) {
         // Turn pump off; also cancel any pending oven-wait
+        _serial.sendInfusionFlowRate(00);
+
         setState(() {
           _isPumpOn = false;
           _awaitingFootswitch = false;
         });
-        _serial.sendPump(false);
+        // _serial.sendPump(false);
         _log('PUMP OFF', level: 'info');
         _pumpOnAt = null;
         return;
       }
       if (_pumpWaiting) {
         // Cancel the pump footswitch wait
+        _serial.sendInfusionFlowRate(00);
         setState(() => _pumpWaiting = false);
         _log('Pump footswitch wait cancelled.', level: 'info');
         return;
@@ -375,7 +384,8 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
         );
         return;
       }
-      // Arm pump — wait for footswitch to actually turn it on
+
+      _serial.sendInfusionFlowRate(_pumpFlow.toDouble());
       setState(() => _pumpWaiting = true);
       _log(
         'Endovascular: waiting for footswitch to turn pump ON…',
@@ -432,12 +442,16 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
         return;
       }
       if (_awaitingFootswitch) {
+        _stopOven();
+
         setState(() => _awaitingFootswitch = false);
         _log('Footswitch wait cancelled.', level: 'info');
         return;
       }
       if (!_isPumpOn) return;
       setState(() => _awaitingFootswitch = true);
+
+      _serial.sendOvenFootswitch(true);
       _log(
         'Footswitch mode: oven armed — waiting for footswitch signal…',
         level: 'warning',

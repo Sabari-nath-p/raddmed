@@ -199,7 +199,7 @@ class SerialService {
     log("send  HEX: $command");
 
     var newcomd = hexToBytes(cmd);
-
+    log(newcomd.toString());
     if (_port == null || !_port!.isOpen) return false;
     try {
       //final bytes = Uint8List.fromList();
