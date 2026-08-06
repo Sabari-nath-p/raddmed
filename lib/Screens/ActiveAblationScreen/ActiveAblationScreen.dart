@@ -225,8 +225,13 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
                 _isPumpOn = true;
                 _pumpOnAt = DateTime.now();
               });
-              _serial.sendPump(true);
-              _log('PUMP ON (footswitch triggered)', level: 'warning');
+              // Endovascular pump is driven by the flow-rate command, not
+              // the generic pump on/off command — send the real flow value.
+              _serial.sendPumpFlowRate(_pumpFlow.toDouble());
+              _log(
+                'PUMP ON (footswitch triggered) — sent Flow Rate $_pumpFlow L/min',
+                level: 'warning',
+              );
             });
             break;
           }
@@ -356,23 +361,28 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     // ── Endovascular mode ──
     if (_isEndoMode(_mode)) {
       if (_isPumpOn) {
-        // Turn pump off; also cancel any pending oven-wait
-        _serial.sendInfusionFlowRate(00);
+        // Turn pump off — send flow-rate command with value 0 (this is
+        // the actual "pump off" signal for this hardware).
+        _serial.sendPumpFlowRate(0);
 
         setState(() {
           _isPumpOn = false;
           _awaitingFootswitch = false;
         });
-        // _serial.sendPump(false);
-        _log('PUMP OFF', level: 'info');
+        _log('PUMP OFF — sent Flow Rate 0 L/min', level: 'info');
         _pumpOnAt = null;
         return;
       }
       if (_pumpWaiting) {
-        // Cancel the pump footswitch wait
-        _serial.sendInfusionFlowRate(00);
+        // Cancel the pump footswitch wait — also send Flow Rate 0 so the
+        // device is explicitly told to stand down, in case it latched
+        // anything while armed and waiting for the footswitch.
+        _serial.sendPumpFlowRate(0);
         setState(() => _pumpWaiting = false);
-        _log('Pump footswitch wait cancelled.', level: 'info');
+        _log(
+          'Pump footswitch wait cancelled — sent Flow Rate 0 L/min',
+          level: 'info',
+        );
         return;
       }
       // Guard: SET must be confirmed
@@ -385,8 +395,11 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
         return;
       }
 
-      _serial.sendInfusionFlowRate(_pumpFlow.toDouble());
+      // NOTE: Flow rate is intentionally NOT sent yet — the device only
+      // receives it once the footswitch confirms the pump turning ON.
       setState(() => _pumpWaiting = true);
+      _serial.sendPumpFlowRate(_pumpFlow.toDouble());
+
       _log(
         'Endovascular: waiting for footswitch to turn pump ON…',
         level: 'warning',
@@ -461,23 +474,20 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
 
     // ── Endovascular mode ──
     if (_isEndoMode(_mode)) {
-      if (_isPumpOn || _pumpWaiting) {}
       if (_isOvenOn) {
         _stopOven();
-
         return;
-      } else {
-        _serial.sendOvenFootswitch(true);
       }
       if (_awaitingFootswitch) {
-        // Cancel oven wait
+        // Cancel oven wait — was previously re-sending "start" first due
+        // to a dead branch below; now it only sends the stop command.
         _stopOven();
-
         setState(() => _awaitingFootswitch = false);
         _log('Oven footswitch wait cancelled.', level: 'info');
         return;
       }
       // Arm oven — wait for footswitch signal
+      _serial.sendOvenFootswitch(true);
       setState(() => _awaitingFootswitch = true);
       _log(
         'Endovascular: oven armed — waiting for footswitch signal…',
@@ -534,32 +544,60 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
             _beepFlash = false;
             if (!_isMuted) _playBeep(long: true); // long beep on completion
 
-            if (_isFootswitchMode(_mode) || _isEndoMode(_mode)) {
+            final bool isCyclic =
+                _isFootswitchMode(_mode) || _isEndoMode(_mode);
+            if (isCyclic) {
               _cycleCount++;
               _remainingSeconds = _timerSeconds;
               _scheduleLog('Cycle $_cycleCount ready.', level: 'success');
             }
-            // Auto stop oven and pump
+
+            // Stop the oven for this cycle — pump handling differs by mode.
             _isOvenOn = false;
             _isPaused = false;
             _ovenTimer?.cancel();
             _beepFlash = false;
             _footswitchActive = false;
-            _isPumpOn = false;
-            _pumpWaiting = false;
-            _pumpOnAt = null;
             _ovenOnAt = null;
-            // Send oven OFF via serial
-            if (_mode == 'Continuous') {
-              _serial.sendOvenContinuous(false);
-            } else {
+
+            if (_isFootswitchMode(_mode)) {
+              // Footswitch mode is cyclic: the pump was never switched
+              // off by a footswitch signal, so it stays ON between
+              // cycles. Only the oven stops here, then re-arms right
+              // away so the next footswitch press starts the next
+              // cycle directly — no need to re-press Pump/Oven.
               _serial.sendOvenFootswitch(false);
+              _awaitingFootswitch = true;
+              _serial.sendOvenFootswitch(true);
+              _scheduleLog(
+                'Cycle complete — Oven OFF (Pump still ON) — armed for next footswitch press.',
+                level: 'warning',
+              );
+            } else if (_isEndoMode(_mode)) {
+              // Endovascular mode: the pump must be fully OFF before the
+              // oven can be armed for the next phase, so stop it here
+              // via the Flow Rate 0 command.
+              _isPumpOn = false;
+              _pumpWaiting = false;
+              _pumpOnAt = null;
+              _serial.sendOvenFootswitch(false);
+              _serial.sendPumpFlowRate(0);
+              _scheduleLog(
+                'Timer complete — System auto-stopped (Oven & Pump OFF).',
+                level: 'warning',
+              );
+            } else {
+              // Continuous mode — single cycle, stop everything.
+              _isPumpOn = false;
+              _pumpWaiting = false;
+              _pumpOnAt = null;
+              _serial.sendOvenContinuous(false);
+              _serial.sendPump(false);
+              _scheduleLog(
+                'Timer complete — System auto-stopped (Oven & Pump OFF).',
+                level: 'warning',
+              );
             }
-            _serial.sendPump(false);
-            _scheduleLog(
-              'Timer complete — System auto-stopped (Oven & Pump OFF).',
-              level: 'warning',
-            );
           } else {
             // Regular tick beep
             if (!_isMuted) {
@@ -633,7 +671,14 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
         _awaitingFootswitch = false;
         _pumpOnAt = null;
       });
-      _serial.sendPump(false);
+      if (_isEndoMode(_mode)) {
+        // Endovascular pump is stopped via Flow Rate 0 — send it whether
+        // the pump was actually running or still waiting for the
+        // footswitch, so the device is always told to stand down.
+        _serial.sendPumpFlowRate(0);
+      } else {
+        _serial.sendPump(false);
+      }
     }
     // Reset cycle count and SET flags on procedure end
     setState(() {
@@ -693,7 +738,10 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
               _pumpWaiting = false;
               _awaitingFootswitch = false;
             });
-            _serial.sendPump(false);
+            // Endovascular pump is stopped via Flow Rate 0 — send it
+            // whether it was actually running or still waiting for the
+            // footswitch, so the device is always told to stand down.
+            _serial.sendPumpFlowRate(0);
           }
           _log('Exited Endovorus mode controls.', level: 'warning');
         },
@@ -1233,11 +1281,13 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
                   });
                 },
                 onSet: (v) {
+                  // NOTE: The flow-rate value is no longer sent to the
+                  // device here. It is staged locally and only actually
+                  // transmitted when the pump turns ON (real value) or
+                  // OFF (value 0) — see _togglePump() / _onSerialData().
                   setState(() => _flowSet = true);
-                  _serial.sendPumpFlowRate(v.toDouble());
-                  final raw = (v.toDouble() * 10).round();
                   _log(
-                    'SET Pump Flow: $v L/min → sent 17${raw.toRadixString(16).toUpperCase().padLeft(2, '0')}',
+                    'SET Pump Flow: $v L/min (staged — sent when pump turns ON)',
                     level: 'info',
                   );
                 },
