@@ -503,7 +503,6 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
       return;
     }
 
-    // ── Continuous mode ──
     if (!_isPumpOn) return;
     _isOvenOn ? _stopOven() : _startOven();
   }
