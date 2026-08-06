@@ -580,27 +580,20 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
                 level: 'warning',
               );
             } else if (_isEndoMode(_mode)) {
-              // Endovascular mode: the pump must be fully OFF before the
-              // oven can be armed for the next phase, so stop it here
-              // via the Flow Rate 0 command.
-              _isPumpOn = false;
-              _pumpWaiting = false;
-              _pumpOnAt = null;
+              // Endovascular mode: the pump is left running as-is — only
+              // the oven stops here. (Previously the pump was force-stopped
+              // via Flow Rate 0 before re-arming; no longer needed.)
               _serial.sendOvenFootswitch(false);
-              _serial.sendPumpFlowRate(0);
               _scheduleLog(
-                'Timer complete — System auto-stopped (Oven & Pump OFF).',
+                'Timer complete — Oven OFF (Pump left running if it was on).',
                 level: 'warning',
               );
             } else {
-              // Continuous mode — single cycle, stop everything.
-              _isPumpOn = false;
-              _pumpWaiting = false;
-              _pumpOnAt = null;
+              // Continuous mode — single cycle. Only the oven stops; the
+              // pump is left running as-is if it was already on.
               _serial.sendOvenContinuous(false);
-              _serial.sendPump(false);
               _scheduleLog(
-                'Timer complete — System auto-stopped (Oven & Pump OFF).',
+                'Timer complete — Oven OFF (Pump left running if it was on).',
                 level: 'warning',
               );
             }
