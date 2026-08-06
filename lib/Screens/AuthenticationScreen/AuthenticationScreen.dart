@@ -94,7 +94,7 @@ class AuthenticationScreen extends StatelessWidget {
                       const Padding(
                         padding: EdgeInsets.only(bottom: 24.0),
                         child: Text(
-                          '© 2026 RAADMED. All rights reserved.',
+                          '© 2026 RADDMED. All rights reserved.',
                           style: TextStyle(color: Colors.white54, fontSize: 12),
                         ),
                       ),

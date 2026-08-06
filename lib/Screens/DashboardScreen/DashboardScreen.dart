@@ -159,7 +159,7 @@ class _SystemStatusCardState extends State<_SystemStatusCard> {
                       Positioned(
                         bottom: 16,
                         child: Text(
-                          'RAADMED Ablation Device',
+                          'RADDMED Ablation Device',
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             color: Colors.grey.shade500,
@@ -685,6 +685,13 @@ class _InfusionDialogState extends State<_InfusionDialog> {
 
   Timer? _repeatTimer;
 
+  @override
+  void initState() {
+    super.initState();
+    // Tell the device an infusion session is starting.
+    _serial.send('2001');
+  }
+
   void _toggleInfusion() {
     setState(() => _isRunning = !_isRunning);
     if (_isRunning) {
@@ -1127,7 +1134,7 @@ class _Footer extends StatelessWidget {
             ],
           ),
           Text(
-            'RAADMED Ablation System v1.0.0',
+            'RADDMED Ablation System v1.0.0',
             style: TextStyle(
               color: Colors.grey.shade500,
               fontSize: 12,

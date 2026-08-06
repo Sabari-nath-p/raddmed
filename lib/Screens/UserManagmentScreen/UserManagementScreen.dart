@@ -845,7 +845,7 @@ class _Footer extends StatelessWidget {
             ],
           ),
           Text(
-            'RAADMED Ablation System v1.0.0',
+            'RADDMED Ablation System v1.0.0',
             style: TextStyle(
               color: Colors.grey.shade400,
               fontSize: 12,

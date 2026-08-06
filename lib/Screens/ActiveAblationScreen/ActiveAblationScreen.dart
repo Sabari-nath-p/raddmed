@@ -176,12 +176,19 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
 
   // ── Serial data handler ────────────────────────────────────────────────────
   void _onSerialData(SerialCommand cmd) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(cmd.value.toString() + "  " + cmd.type.name),
-        backgroundColor: Colors.red,
-      ),
-    );
+    // TEMPORARY DEBUG: beep + snackbar on every raw serial receive, showing
+    // the value exactly as it arrived on the wire (no hex/decimal parsing
+    // applied) so mis-decoded readings can be spotted against RealTerm.
+    // Remove once the hex-parsing path is confirmed correct on hardware.
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('RAW: ${cmd.raw ?? "(no raw)"}  [${cmd.type.name}]'),
+          backgroundColor: Colors.red,
+          duration: const Duration(milliseconds: 800),
+        ),
+      );
+    }
     if (!mounted) return;
     setState(() {
       switch (cmd.type) {

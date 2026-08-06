@@ -19,7 +19,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'RAADMED Patients',
+      title: 'RADDMED Patients',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         scaffoldBackgroundColor: const Color(0xFFF8F9FA),
@@ -1330,7 +1330,7 @@ class _Footer extends StatelessWidget {
             ],
           ),
           Text(
-            'RAADMED Ablation System v1.0.0',
+            'RADDMED Ablation System v1.0.0',
             style: TextStyle(
               color: Colors.grey.shade500,
               fontSize: 12,

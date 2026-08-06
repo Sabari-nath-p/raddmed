@@ -3,10 +3,11 @@ import 'dart:convert';
 import 'dart:developer';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:flutter/material.dart';
 import 'package:flutter_libserialport/flutter_libserialport.dart';
 
 /// Singleton service that manages serial port communication with the
-/// RAADMED ablation device.
+/// RADDMED ablation device.
 ///
 /// ## Protocol Reference
 /// ### Outgoing (App → Device)
@@ -25,13 +26,14 @@ import 'package:flutter_libserialport/flutter_libserialport.dart';
 /// | 18   | `18{VAL}\n`  | Set infusion flow rate               |
 ///
 /// ### Incoming (Device → App)
+/// `{DATA}` is hex text (uppercase or lowercase), ×10 of the real value.
 /// | Cmd  | Format       | Description                          |
 /// |------|--------------|--------------------------------------|
-/// | 22   | `22{DATA}\n` | Shaft temperature (×10, e.g. 370=37.0°C) |
-/// | 23   | `23{DATA}\n` | Edge temperature  (×10)              |
-/// | 24   | `24{DATA}\n` | Power           (×10)              |
+/// | 22   | `22{DATA}\n` | Shaft temperature (×10, e.g. 22E6=37.0°C, 0xE6=230) |
+/// | 23   | `23{DATA}\n` | Edge temperature  (×10, hex)         |
+/// | 24   | `24{DATA}\n` | Power           (×10, hex)          |
 /// | 25   | `25\n`       | Footswitch activated                 |
-/// |26    | 26{DATA}\n | Endovonuse Pumb on          (×10)              |
+/// |26    | 26{DATA}\n | Endovonuse Pumb on          (×10, hex)              |
 class SerialService {
   // ── Singleton ──────────────────────────────────────────────────────────────
   SerialService._();
@@ -261,22 +263,51 @@ class SerialService {
 
   // ── Incoming Data Parser ───────────────────────────────────────────────────
   void _onData(Uint8List data) {
-    final chunk = String.fromCharCodes(data);
-    _buffer.write(chunk);
+    // Guard the whole receive path: this runs on every byte chunk from the
+    // reader stream, and a thrown exception here happens synchronously
+    // inside the listen() callback, so it does NOT reach the subscription's
+    // onError — it would otherwise surface as an uncaught error and the
+    // failure would be invisible to the user. Catch it, log it, and surface
+    // it on dataStream so screens listening for SerialCommand can show it.
+    try {
+      final chunk = String.fromCharCodes(data);
+      _buffer.write(chunk);
 
-    // Process complete lines (newline-terminated)
-    while (true) {
-      final content = _buffer.toString();
-      final nlIdx = content.indexOf('\n');
-      if (nlIdx == -1) break;
+      // Process complete lines (newline-terminated)
+      while (true) {
+        final content = _buffer.toString();
+        final nlIdx = content.indexOf('\n');
+        if (nlIdx == -1) break;
 
-      final line = content.substring(0, nlIdx).trim();
-      _buffer.clear();
-      _buffer.write(content.substring(nlIdx + 1));
+        final line = content.substring(0, nlIdx).trim();
+        _buffer.clear();
+        _buffer.write(content.substring(nlIdx + 1));
 
-      if (line.isEmpty) continue;
-      log("GET : $line");
-      _parseLine(line);
+        if (line.isEmpty) continue;
+        log("GET : $line");
+        try {
+          _parseLine(line);
+        } catch (e, st) {
+          log("Serial parse error for line '$line': $e", stackTrace: st);
+          _dataCtrl.add(
+            SerialCommand(
+              type: SerialCommandType.unknown,
+              value: 0,
+              raw: 'PARSE ERROR: $e (line="$line")',
+            ),
+          );
+        }
+      }
+    } catch (e, st) {
+      log("Serial receive error: $e", stackTrace: st);
+      _buffer.clear(); // drop whatever partial data caused the failure
+      _dataCtrl.add(
+        SerialCommand(
+          type: SerialCommandType.unknown,
+          value: 0,
+          raw: 'RECEIVE ERROR: $e',
+        ),
+      );
     }
   }
 
@@ -286,7 +317,11 @@ class SerialService {
 
     if (line == '25') {
       _dataCtrl.add(
-        const SerialCommand(type: SerialCommandType.footswitch, value: 1.0),
+        const SerialCommand(
+          type: SerialCommandType.footswitch,
+          value: 1.0,
+          raw: '25',
+        ),
       );
       return;
     }
@@ -295,7 +330,13 @@ class SerialService {
     if (line.length >= 3) {
       final prefix = line.substring(0, 2);
       final dataStr = line.substring(2);
-      final rawVal = int.tryParse(dataStr);
+      // Device sends sensor readings as hex text (matching the hex-based
+      // outgoing protocol, see _toHex/hexToBytes above) — e.g. "22FF" means
+      // raw hex FF (255), not decimal 255. Parsing this as decimal silently
+      // fails (returns null) whenever the value contains A-F, so no data
+      // event is emitted and the live graph never updates for that sample.
+      final rawVal = int.tryParse(dataStr, radix: 16);
+      
 
       if (rawVal != null) {
         switch (prefix) {
@@ -304,6 +345,7 @@ class SerialService {
               SerialCommand(
                 type: SerialCommandType.shaftTemp,
                 value: rawVal / 10.0,
+                raw: line, // unparsed line, e.g. for temporary debug display
               ),
             );
             return;
@@ -312,6 +354,7 @@ class SerialService {
               SerialCommand(
                 type: SerialCommandType.edgeTemp,
                 value: rawVal / 10.0,
+                raw: line,
               ),
             );
             return;
@@ -320,6 +363,7 @@ class SerialService {
               SerialCommand(
                 type: SerialCommandType.voltage,
                 value: rawVal / 10.0,
+                raw: line,
               ),
             );
             return;
