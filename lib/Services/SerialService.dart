@@ -26,7 +26,24 @@ import 'package:flutter_libserialport/flutter_libserialport.dart';
 /// | 18   | `18{VAL}\n`  | Set infusion flow rate               |
 ///
 /// ### Incoming (Device → App)
-/// `{DATA}` is hex text (uppercase or lowercase), ×10 of the real value.
+/// Current (Nextion-style) format — plain decimal values, no scaling:
+/// | Tag       | Format         | Description                                  |
+/// |-----------|----------------|-----------------------------------------------|
+/// | `n1.val`  | `n1.val=150\n` | Power, direct value (e.g. 150 = 150 W)       |
+/// | `n2.val`  | `n2.val=120\n` | Shaft temperature, direct value (°C)         |
+/// | `n3.val`  | `n3.val=160\n` | Edge temperature, direct value (°C)          |
+/// | `tm0.en`  | `tm0.en=1\n`   | Footswitch PRESSED (level signal, held down) |
+/// |           | `tm0.en=0\n`   | Footswitch RELEASED                          |
+///
+/// The footswitch is a level (dead-man) signal, not a one-shot pulse:
+///  - `tm0.en=1` fires whatever action is currently armed — turns the pump
+///    ON while waiting (Endovorus phase 1), starts the oven while armed
+///    (Footswitch mode / Endovorus phase 2), or resumes a paused oven.
+///  - `tm0.en=0` pauses a running oven (Footswitch / Endovorus modes) and,
+///    in Endovorus mode, turns the pump back OFF (re-arming it so the next
+///    press turns it back on).
+///
+/// Legacy hex protocol (kept as a fallback for older firmware):
 /// | Cmd  | Format       | Description                          |
 /// |------|--------------|--------------------------------------|
 /// | 22   | `22{DATA}\n` | Shaft temperature (×10, e.g. 22E6=37.0°C, 0xE6=230) |
@@ -312,9 +329,74 @@ class SerialService {
   }
 
   void _parseLine(String line) {
-    // Command 25 — footswitch (exact match, no data payload)
     print(line);
 
+    // ── Current (Nextion-style) protocol ────────────────────────────────────
+    // n1.val=<int> → power (direct value, no scaling), e.g. n1.val=150 = 150 W
+    // n2.val=<int> → shaft temperature (direct value, °C)
+    // n3.val=<int> → edge temperature (direct value, °C)
+    // tm0.en=1/0   → footswitch level signal: 1 = pressed/held, 0 = released
+    if (line.startsWith('n1.val=')) {
+      final v = int.tryParse(line.substring('n1.val='.length).trim());
+      if (v != null) {
+        _dataCtrl.add(
+          SerialCommand(
+            type: SerialCommandType.voltage,
+            value: v.toDouble(),
+            raw: line,
+          ),
+        );
+        return;
+      }
+    }
+
+    if (line.startsWith('n2.val=')) {
+      final v = int.tryParse(line.substring('n2.val='.length).trim());
+      if (v != null) {
+        _dataCtrl.add(
+          SerialCommand(
+            type: SerialCommandType.shaftTemp,
+            value: v.toDouble(),
+            raw: line,
+          ),
+        );
+        return;
+      }
+    }
+
+    if (line.startsWith('n3.val=')) {
+      final v = int.tryParse(line.substring('n3.val='.length).trim());
+      if (v != null) {
+        _dataCtrl.add(
+          SerialCommand(
+            type: SerialCommandType.edgeTemp,
+            value: v.toDouble(),
+            raw: line,
+          ),
+        );
+        return;
+      }
+    }
+
+    if (line.startsWith('tm0.en=')) {
+      final v = int.tryParse(line.substring('tm0.en='.length).trim());
+      if (v != null) {
+        _dataCtrl.add(
+          SerialCommand(
+            type: SerialCommandType.footswitch,
+            // Level signal: 1 = pressed/held, 0 = released. Any non-zero
+            // value is treated as "pressed" so the app stays robust to
+            // stray values from the panel.
+            value: v == 0 ? 0.0 : 1.0,
+            raw: line,
+          ),
+        );
+        return;
+      }
+    }
+
+    // ── Legacy hex protocol (fallback for older firmware) ──────────────────
+    // Command 25 — footswitch (exact match, no data payload)
     if (line == '25') {
       _dataCtrl.add(
         const SerialCommand(
@@ -399,10 +481,10 @@ class SerialService {
 
 /// The type of data received from the device.
 enum SerialCommandType {
-  shaftTemp, // 22
-  edgeTemp, // 23
-  voltage, // 24
-  footswitch, // 25
+  shaftTemp, // n2.val (legacy: 22)
+  edgeTemp, // n3.val (legacy: 23)
+  voltage, // n1.val — power (legacy: 24)
+  footswitch, // tm0.en — level signal, value 1.0=pressed / 0.0=released (legacy: 25)
   unknown,
 }
 

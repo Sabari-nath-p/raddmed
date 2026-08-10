@@ -217,61 +217,116 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
           pushHist(_voltageHist, _voltage);
           break;
         case SerialCommandType.footswitch:
-          _scheduleLog('Footswitch ACTIVE (serial signal 25)', level: 'info');
+          // tm0.en is a level signal from the pedal: 1 = pressed/held,
+          // 0 = released. It replaces the old one-shot "25" pulse.
+          final pressed = cmd.value != 0;
+          _footswitchActive = pressed;
 
-          // ── Endovascular: footswitch turns PUMP ON (phase 1) ──
-          if (_isEndoMode(_mode) && _pumpWaiting && !_isPumpOn) {
-            _scheduleLog(
-              'Footswitch received — Pump turning ON.',
-              level: 'success',
-            );
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (!mounted) return;
-              setState(() {
-                _pumpWaiting = false;
-                _isPumpOn = true;
-                _pumpOnAt = DateTime.now();
+          if (pressed) {
+            _scheduleLog('Footswitch PRESSED (tm0.en=1)', level: 'info');
+
+            // ── Endovascular: footswitch turns PUMP ON (phase 1) ──
+            if (_isEndoMode(_mode) && _pumpWaiting && !_isPumpOn) {
+              _pumpWaiting = false;
+              _isPumpOn = true;
+              _pumpOnAt = DateTime.now();
+              _scheduleLog(
+                'Footswitch pressed — Pump turning ON.',
+                level: 'success',
+              );
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!mounted) return;
+                // Endovascular pump is driven by the flow-rate command, not
+                // the generic pump on/off command — send the real flow value.
+                _serial.sendPumpFlowRate(_pumpFlow.toDouble());
+                _log(
+                  'PUMP ON (footswitch triggered) — sent Flow Rate $_pumpFlow L/min',
+                  level: 'warning',
+                );
               });
-              // Endovascular pump is driven by the flow-rate command, not
-              // the generic pump on/off command — send the real flow value.
-              _serial.sendPumpFlowRate(_pumpFlow.toDouble());
-              _log(
-                'PUMP ON (footswitch triggered) — sent Flow Rate $_pumpFlow L/min',
+              break;
+            }
+
+            // ── Endovascular: footswitch starts OVEN (phase 2, pump already OFF) ──
+            if (_isEndoMode(_mode) &&
+                _awaitingFootswitch &&
+                !_isPumpOn &&
+                !_isOvenOn) {
+              _awaitingFootswitch = false;
+              _scheduleLog(
+                'Footswitch pressed — starting oven.',
+                level: 'success',
+              );
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) _startOven();
+              });
+              break;
+            }
+
+            // ── Footswitch mode: footswitch starts OVEN ──
+            if (_isFootswitchMode(_mode) &&
+                _isPumpOn &&
+                !_isOvenOn &&
+                _awaitingFootswitch) {
+              _awaitingFootswitch = false;
+              _scheduleLog(
+                'Footswitch pressed — starting oven.',
+                level: 'success',
+              );
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) _startOven();
+              });
+              break;
+            }
+
+            // ── Footswitch / Endovascular: pedal resumes a PAUSED oven ──
+            if ((_isFootswitchMode(_mode) || _isEndoMode(_mode)) &&
+                _isOvenOn &&
+                _isPaused) {
+              _scheduleLog(
+                'Footswitch pressed — resuming oven.',
+                level: 'success',
+              );
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) _resumeOvenFromFootswitch();
+              });
+            }
+          } else {
+            _scheduleLog('Footswitch RELEASED (tm0.en=0)', level: 'info');
+
+            // ── Endovascular: pedal release turns PUMP OFF, re-arming it
+            // so the next press turns it back on (dead-man switch). ──
+            if (_isEndoMode(_mode) && _isPumpOn) {
+              _isPumpOn = false;
+              _pumpOnAt = null;
+              _pumpWaiting = true;
+              _scheduleLog(
+                'Footswitch released — Pump turning OFF.',
                 level: 'warning',
               );
-            });
-            break;
-          }
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!mounted) return;
+                _serial.sendPumpFlowRate(0);
+                _log(
+                  'PUMP OFF (footswitch released) — sent Flow Rate 0 L/min',
+                  level: 'info',
+                );
+              });
+              break;
+            }
 
-          // ── Endovascular: footswitch starts OVEN (phase 2, pump already OFF) ──
-          if (_isEndoMode(_mode) &&
-              _awaitingFootswitch &&
-              !_isPumpOn &&
-              !_isOvenOn) {
-            _awaitingFootswitch = false;
-            _scheduleLog(
-              'Footswitch received — starting oven.',
-              level: 'success',
-            );
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) _startOven();
-            });
-            break;
-          }
-
-          // ── Footswitch mode: footswitch starts OVEN ──
-          if (_isFootswitchMode(_mode) &&
-              _isPumpOn &&
-              !_isOvenOn &&
-              _awaitingFootswitch) {
-            _awaitingFootswitch = false;
-            _scheduleLog(
-              'Footswitch received — starting oven.',
-              level: 'success',
-            );
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) _startOven();
-            });
+            // ── Footswitch / Endovascular: pedal release pauses a running oven ──
+            if ((_isFootswitchMode(_mode) || _isEndoMode(_mode)) &&
+                _isOvenOn &&
+                !_isPaused) {
+              _scheduleLog(
+                'Footswitch released — pausing oven.',
+                level: 'warning',
+              );
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) _pauseOvenFromFootswitch();
+              });
+            }
           }
           break;
         case SerialCommandType.unknown:
@@ -658,7 +713,49 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     }
   }
 
-  // ── Footswitch state is driven exclusively by serial signal 25 ─────────────
+  // ── Pause / Resume driven by the footswitch pedal (Footswitch / Endovorus
+  // modes) ────────────────────────────────────────────────────────────────
+  // The pedal is a dead-man switch in these modes: releasing it (tm0.en=0)
+  // pauses the oven, pressing it again (tm0.en=1) resumes from where it left
+  // off. Mirrors _togglePause but uses the mode-aware oven on/off command
+  // (sendOvenFootswitch) instead of sendOvenContinuous.
+  void _pauseOvenFromFootswitch() {
+    if (!_isOvenOn || _isPaused) return;
+    _ovenTimer?.cancel();
+    _serial.sendOvenFootswitch(false);
+    setState(() => _isPaused = true);
+    _log(
+      'OVEN PAUSED (footswitch released) — Elapsed: ${_fmt(_elapsedSeconds)}  Remaining: ${_fmt(_remainingSeconds)}',
+      level: 'warning',
+    );
+  }
+
+  void _resumeOvenFromFootswitch() {
+    if (!_isOvenOn || !_isPaused) return;
+    _serial.sendOvenFootswitch(true);
+    setState(() => _isPaused = false);
+    _log(
+      'OVEN RESUMED (footswitch pressed) — Remaining: ${_fmt(_remainingSeconds)}',
+      level: 'warning',
+    );
+    _runOvenTimerLoop();
+  }
+
+  // ── TEST-ONLY: mock footswitch buttons ──────────────────────────────────
+  // Simulates receiving tm0.en=1 / tm0.en=0 from the device without needing
+  // real hardware connected. Feeds the same code path as a genuine serial
+  // read (_onSerialData) so it exercises the real footswitch state machine.
+  void _mockFootswitch(bool pressed) {
+    _onSerialData(
+      SerialCommand(
+        type: SerialCommandType.footswitch,
+        value: pressed ? 1.0 : 0.0,
+        raw: 'MOCK tm0.en=${pressed ? 1 : 0}',
+      ),
+    );
+  }
+
+  // ── Footswitch state is driven by the tm0.en level signal ──────────────────
 
   // ── End Procedure ──────────────────────────────────────────────────────────
   Future<void> _endProcedure() async {
@@ -1519,7 +1616,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // FOOTSWITCH STATUS (read-only — driven by serial command 25)
+  // FOOTSWITCH STATUS (read-only — driven by tm0.en level signal)
   // ─────────────────────────────────────────────────────────────────────────
   Widget _buildFootswitchStatus() {
     return AnimatedContainer(
@@ -1560,9 +1657,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
           ),
           const SizedBox(width: 8),
           Text(
-            _footswitchActive
-                ? 'ACTIVE — timer counting'
-                : 'Waiting for signal 25…',
+            _footswitchActive ? 'PRESSED (tm0.en=1)' : 'Released (tm0.en=0)',
             style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w700,
@@ -1688,6 +1783,25 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
             onTap: () => setState(() => _isMuted = !_isMuted),
           ),
           const SizedBox(width: 10),
+          // ── TEST-ONLY: mock footswitch buttons (tm0.en=1 / tm0.en=0) ──
+          if (_isFootswitchMode(_mode) || _isEndoMode(_mode)) ...[
+            _BarBtn(
+              label: 'Mock tm0.en=1',
+              icon: Icons.touch_app_rounded,
+              active: _footswitchActive,
+              activeColor: _kGreen,
+              onTap: () => _mockFootswitch(true),
+            ),
+            const SizedBox(width: 10),
+            _BarBtn(
+              label: 'Mock tm0.en=0',
+              icon: Icons.touch_app_outlined,
+              active: !_footswitchActive,
+              activeColor: _kSubText,
+              onTap: () => _mockFootswitch(false),
+            ),
+            const SizedBox(width: 10),
+          ],
           // Beep flash
           if (_isOvenOn && !_isPaused && !_isMuted && _beepFlash)
             Container(
