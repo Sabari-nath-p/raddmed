@@ -280,17 +280,38 @@ class SerialService {
 
   // ── Incoming Data Parser ───────────────────────────────────────────────────
   void _onData(Uint8List data) {
-    // Guard the whole receive path: this runs on every byte chunk from the
-    // reader stream, and a thrown exception here happens synchronously
-    // inside the listen() callback, so it does NOT reach the subscription's
-    // onError — it would otherwise surface as an uncaught error and the
-    // failure would be invisible to the user. Catch it, log it, and surface
-    // it on dataStream so screens listening for SerialCommand can show it.
+    // ── RAW DEBUG ──────────────────────────────────────────────────────────
+    // Dumps every byte exactly as it arrived off the wire, BEFORE any
+    // newline-splitting or parsing. If values aren't showing up after
+    // connecting to real hardware, check this first:
+    //   - Nothing logged at all → no bytes are arriving (wrong port, wrong
+    //     baud rate, cable/wiring, or the device isn't sending).
+    //   - Bytes logged but hex looks like garbage/repeating 0xFF / random →
+    //     wrong baud rate (framing error) or wrong port.
+    //   - ascii shows a real line but WITHOUT a trailing \n (0a) → the
+    //     device isn't newline-terminating, so _onData buffers forever and
+    //     _parseLine never runs. Check for \r-only ("\\r" but no "\\n") too.
+    //   - ascii shows a line but with different variable names / casing
+    //     than "n1.val=", "n2.val=", "n3.val=", "tm0.en=" → the firmware's
+    //     actual tag names don't match _parseLine and need to be updated.
+    final hex = data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+    final asciiRaw = String.fromCharCodes(data);
+    final asciiEscaped = asciiRaw
+        .replaceAll('\r', '\\r')
+        .replaceAll('\n', '\\n');
+    log('RAW RX (${data.length} bytes) ascii="$asciiEscaped" hex=[$hex]');
+    _dataCtrl.add(
+      SerialCommand(
+        type: SerialCommandType.unknown,
+        value: 0,
+        raw: 'RAW RX: "$asciiEscaped" (hex: $hex)',
+      ),
+    );
+
     try {
       final chunk = String.fromCharCodes(data);
       _buffer.write(chunk);
 
-      // Process complete lines (newline-terminated)
       while (true) {
         final content = _buffer.toString();
         final nlIdx = content.indexOf('\n');
