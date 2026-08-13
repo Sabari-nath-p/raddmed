@@ -215,7 +215,7 @@ class SerialService {
   bool send(String cmd) {
     log("send : $cmd");
     var command = hexToNumber(cmd).toString();
-    log("send  HEX: $command");
+    // log("send  HEX: $command");
 
     var newcomd = hexToBytes(cmd);
     log(newcomd.toString());
@@ -418,7 +418,6 @@ class SerialService {
       // fails (returns null) whenever the value contains A-F, so no data
       // event is emitted and the live graph never updates for that sample.
       final rawVal = int.tryParse(dataStr, radix: 16);
-      
 
       if (rawVal != null) {
         switch (prefix) {

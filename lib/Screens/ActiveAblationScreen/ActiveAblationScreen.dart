@@ -263,8 +263,11 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
               break;
             }
 
-            // ── Footswitch mode: footswitch starts OVEN ──
-            if (_isFootswitchMode(_mode) &&
+            // ── Footswitch mode, and Endovorus cyclic restarts: footswitch
+            // starts OVEN while the pump is left running (e.g. Endovorus
+            // cycle 2+, re-armed after the previous cycle's timer ended
+            // without forcing the pump off) ──
+            if ((_isFootswitchMode(_mode) || _isEndoMode(_mode)) &&
                 _isPumpOn &&
                 !_isOvenOn &&
                 _awaitingFootswitch) {
@@ -294,9 +297,29 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
           } else {
             _scheduleLog('Footswitch RELEASED (tm0.en=0)', level: 'info');
 
+            // ── Footswitch / Endovascular: pedal release pauses a running
+            // oven — checked FIRST so that once the oven is running, the
+            // pedal exclusively controls oven pause/resume and never also
+            // kills the (still-running-underneath) pump. ──
+            if ((_isFootswitchMode(_mode) || _isEndoMode(_mode)) &&
+                _isOvenOn &&
+                !_isPaused) {
+              _scheduleLog(
+                'Footswitch released — pausing oven.',
+                level: 'warning',
+              );
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) _pauseOvenFromFootswitch();
+              });
+              break;
+            }
+
             // ── Endovascular: pedal release turns PUMP OFF, re-arming it
-            // so the next press turns it back on (dead-man switch). ──
-            if (_isEndoMode(_mode) && _isPumpOn) {
+            // so the next press turns it back on (dead-man switch). Only
+            // applies while the oven isn't running — i.e. still in the
+            // pump-hold phase (phase 1) — so it never fires as a side
+            // effect of pausing the oven mid-ablation. ──
+            if (_isEndoMode(_mode) && _isPumpOn && !_isOvenOn) {
               _isPumpOn = false;
               _pumpOnAt = null;
               _pumpWaiting = true;
@@ -311,20 +334,6 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
                   'PUMP OFF (footswitch released) — sent Flow Rate 0 L/min',
                   level: 'info',
                 );
-              });
-              break;
-            }
-
-            // ── Footswitch / Endovascular: pedal release pauses a running oven ──
-            if ((_isFootswitchMode(_mode) || _isEndoMode(_mode)) &&
-                _isOvenOn &&
-                !_isPaused) {
-              _scheduleLog(
-                'Footswitch released — pausing oven.',
-                level: 'warning',
-              );
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) _pauseOvenFromFootswitch();
               });
             }
           }
@@ -436,9 +445,8 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
         return;
       }
       if (_pumpWaiting) {
-        // Cancel the pump footswitch wait — also send Flow Rate 0 so the
-        // device is explicitly told to stand down, in case it latched
-        // anything while armed and waiting for the footswitch.
+        // Cancel the pump footswitch wait — explicit user action, so send
+        // Flow Rate 0 as a stand-down, even though nothing was sent yet.
         _serial.sendPumpFlowRate(0);
         setState(() => _pumpWaiting = false);
         _log(
@@ -457,11 +465,10 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
         return;
       }
 
-      // NOTE: Flow rate is intentionally NOT sent yet — the device only
-      // receives it once the footswitch confirms the pump turning ON.
+      // Arm only — do NOT send the flow-rate ON command here. It is only
+      // ever sent from the footswitch-pressed handler in _onSerialData,
+      // once the real tm0.en=1 signal arrives.
       setState(() => _pumpWaiting = true);
-      _serial.sendPumpFlowRate(_pumpFlow.toDouble());
-
       _log(
         'Endovascular: waiting for footswitch to turn pump ON…',
         level: 'warning',
@@ -507,8 +514,10 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
 
   // ── Oven control ───────────────────────────────────────────────────────────
   // Continuous:   oven requires pump ON → starts immediately.
-  // Footswitch:   click oven → arm → footswitch signal → oven starts.
-  // Endovascular: pump must be OFF; click oven → arm → footswitch → oven starts.
+  // Footswitch:   click oven → arm (no serial command sent yet) → real
+  //               footswitch press (tm0.en=1) → oven ON command sent.
+  // Endovascular: pump must be OFF; click oven → arm (no serial command
+  //               sent yet) → real footswitch press → oven ON command sent.
   void _toggleOven() {
     // ── Footswitch mode ──
     if (_isFootswitchMode(_mode)) {
@@ -524,9 +533,10 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
         return;
       }
       if (!_isPumpOn) return;
+      // Arm only — do NOT send the oven ON command here. It is only ever
+      // sent from _startOven(), which runs when the real footswitch press
+      // (tm0.en=1) arrives in _onSerialData.
       setState(() => _awaitingFootswitch = true);
-
-      _serial.sendOvenFootswitch(true);
       _log(
         'Footswitch mode: oven armed — waiting for footswitch signal…',
         level: 'warning',
@@ -548,8 +558,9 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
         _log('Oven footswitch wait cancelled.', level: 'info');
         return;
       }
-      // Arm oven — wait for footswitch signal
-      _serial.sendOvenFootswitch(true);
+      // Arm only — do NOT send the oven ON command here. It is only ever
+      // sent from _startOven(), which runs when the real footswitch press
+      // (tm0.en=1) arrives in _onSerialData.
       setState(() => _awaitingFootswitch = true);
       _log(
         'Endovascular: oven armed — waiting for footswitch signal…',
@@ -624,23 +635,28 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
             if (_isFootswitchMode(_mode)) {
               // Footswitch mode is cyclic: the pump was never switched
               // off by a footswitch signal, so it stays ON between
-              // cycles. Only the oven stops here, then re-arms right
-              // away so the next footswitch press starts the next
-              // cycle directly — no need to re-press Pump/Oven.
+              // cycles. Only the oven OFF command is sent here — the ON
+              // command for the next cycle must NOT be sent automatically;
+              // it only goes out once the real footswitch press arrives
+              // (see _startOven(), called from the footswitch handler).
               _serial.sendOvenFootswitch(false);
               _awaitingFootswitch = true;
-              _serial.sendOvenFootswitch(true);
               _scheduleLog(
                 'Cycle complete — Oven OFF (Pump still ON) — armed for next footswitch press.',
                 level: 'warning',
               );
             } else if (_isEndoMode(_mode)) {
-              // Endovascular mode: the pump is left running as-is — only
-              // the oven stops here. (Previously the pump was force-stopped
-              // via Flow Rate 0 before re-arming; no longer needed.)
+              // Endovorus mode: same cyclic pattern as Footswitch mode —
+              // timer end turns OFF the oven ONLY and re-arms it, waiting
+              // for the next footswitch press to start the next cycle
+              // directly. The pump's on/off state is left exactly as it
+              // was (still running if it was running) — not forced off
+              // and not re-armed to the pump-wait phase; the pump keeps
+              // being driven solely by its own footswitch press/release.
               _serial.sendOvenFootswitch(false);
+              _awaitingFootswitch = true;
               _scheduleLog(
-                'Timer complete — Oven OFF (Pump left running if it was on).',
+                'Cycle complete — Oven OFF (Pump left running if it was on) — armed for next footswitch press.',
                 level: 'warning',
               );
             } else {
