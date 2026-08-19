@@ -24,24 +24,37 @@ import 'package:flutter_libserialport/flutter_libserialport.dart';
 /// |      | `1601\n`     | Oven ON  (Footswitch/Endovorus)      |
 /// | 17   | `17{VAL}\n`  | Set pump flow rate (Endovorus)       |
 /// | 18   | `18{VAL}\n`  | Set infusion flow rate               |
+/// | 21   | `2101\n`     | Timer/cycle end (Footswitch/Endovorus) |
 ///
 /// ### Incoming (Device → App)
-/// Current (Nextion-style) format — plain decimal values, no scaling:
-/// | Tag       | Format         | Description                                  |
-/// |-----------|----------------|-----------------------------------------------|
-/// | `n1.val`  | `n1.val=150\n` | Power, direct value (e.g. 150 = 150 W)       |
-/// | `n2.val`  | `n2.val=120\n` | Shaft temperature, direct value (°C)         |
-/// | `n3.val`  | `n3.val=160\n` | Edge temperature, direct value (°C)          |
-/// | `tm0.en`  | `tm0.en=1\n`   | Footswitch PRESSED (level signal, held down) |
-/// |           | `tm0.en=0\n`   | Footswitch RELEASED                          |
+/// Current (Nextion-style) format — plain decimal values, no scaling.
+/// Confirmed on real hardware: every message is terminated by three 0xFF
+/// bytes (NOT a newline), e.g. `n1.val=049\xFF\xFF\xFF`. `\n` is still
+/// accepted as a fallback terminator — see the line-splitting logic in
+/// `_onData` below.
+/// | Tag       | Format           | Description                                  |
+/// |-----------|------------------|-----------------------------------------------|
+/// | `n1.val`  | `n1.val=150\xFF\xFF\xFF` | Power, direct value (e.g. 150 = 150 W)       |
+/// | `n2.val`  | `n2.val=120\xFF\xFF\xFF` | Shaft temperature, direct value (°C)         |
+/// | `n3.val`  | `n3.val=160\xFF\xFF\xFF` | Edge temperature, direct value (°C)          |
+/// | `tm0.en`  | `tm0.en=1\xFF\xFF\xFF`   | Footswitch PRESSED (level signal, held down) |
+/// |           | `tm0.en=0\xFF\xFF\xFF`   | Footswitch RELEASED                          |
 ///
-/// The footswitch is a level (dead-man) signal, not a one-shot pulse:
-///  - `tm0.en=1` fires whatever action is currently armed — turns the pump
-///    ON while waiting (Endovorus phase 1), starts the oven while armed
-///    (Footswitch mode / Endovorus phase 2), or resumes a paused oven.
+/// The footswitch is a level (dead-man) signal, not a one-shot pulse. Most
+/// of the time it only drives the app's LOCAL UI/timer state — but it DOES
+/// send `1601` for a cyclic restart, since that automatic re-arm (after a
+/// timer-end) has no button click to send it from instead:
+///  - `tm0.en=1`:
+///    - Oven armed by a real button click (first cycle) → local start
+///      only, no command (`1601` was already sent at the click).
+///    - Oven re-armed automatically after a timer-end (`2101`, cycle 2+,
+///      no button click happened) → THIS press sends `1601`.
+///    - Resumes a paused oven → local only, no command.
+///    - Endovorus phase 1 (pump-wait) → sends the pump flow-rate-ON
+///      command (arming the pump also has no separate button click).
 ///  - `tm0.en=0` pauses a running oven (Footswitch / Endovorus modes) and,
-///    in Endovorus mode, turns the pump back OFF (re-arming it so the next
-///    press turns it back on).
+///    in Endovorus mode, re-arms the pump wait so the next press turns it
+///    back on. No serial command is sent for a release, in either case.
 ///
 /// Legacy hex protocol (kept as a fallback for older firmware):
 /// | Cmd  | Format       | Description                          |
@@ -260,6 +273,11 @@ class SerialService {
   /// Send `1601` / `1600` — oven ON/OFF in Footswitch/Endovorus mode
   bool sendOvenFootswitch(bool on) => send(on ? '1601' : '1600');
 
+  /// Send `2101` — timer/cycle end signal in Footswitch/Endovorus mode.
+  /// Sent when the countdown reaches zero, in place of the `1600` oven-OFF
+  /// command used elsewhere.
+  bool sendOvenFootswitchTimerEnd() => send('2101');
+
   /// Send `17{HEX2}` — set pump flow rate in Endovorus mode
   /// Value = rateL × 10 (tenths of L/min), zero-padded to ≥2 hex digits
   /// e.g. 1.0 L/min → 10 → '170A'
@@ -280,46 +298,31 @@ class SerialService {
 
   // ── Incoming Data Parser ───────────────────────────────────────────────────
   void _onData(Uint8List data) {
-    // ── RAW DEBUG ──────────────────────────────────────────────────────────
-    // Dumps every byte exactly as it arrived off the wire, BEFORE any
-    // newline-splitting or parsing. If values aren't showing up after
-    // connecting to real hardware, check this first:
-    //   - Nothing logged at all → no bytes are arriving (wrong port, wrong
-    //     baud rate, cable/wiring, or the device isn't sending).
-    //   - Bytes logged but hex looks like garbage/repeating 0xFF / random →
-    //     wrong baud rate (framing error) or wrong port.
-    //   - ascii shows a real line but WITHOUT a trailing \n (0a) → the
-    //     device isn't newline-terminating, so _onData buffers forever and
-    //     _parseLine never runs. Check for \r-only ("\\r" but no "\\n") too.
-    //   - ascii shows a line but with different variable names / casing
-    //     than "n1.val=", "n2.val=", "n3.val=", "tm0.en=" → the firmware's
-    //     actual tag names don't match _parseLine and need to be updated.
-    final hex = data.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
-    final asciiRaw = String.fromCharCodes(data);
-    final asciiEscaped = asciiRaw
-        .replaceAll('\r', '\\r')
-        .replaceAll('\n', '\\n');
-    log('RAW RX (${data.length} bytes) ascii="$asciiEscaped" hex=[$hex]');
-    _dataCtrl.add(
-      SerialCommand(
-        type: SerialCommandType.unknown,
-        value: 0,
-        raw: 'RAW RX: "$asciiEscaped" (hex: $hex)',
-      ),
-    );
-
     try {
       final chunk = String.fromCharCodes(data);
       _buffer.write(chunk);
 
       while (true) {
         final content = _buffer.toString();
-        final nlIdx = content.indexOf('\n');
-        if (nlIdx == -1) break;
 
-        final line = content.substring(0, nlIdx).trim();
+        final ffIdx = content.indexOf('ÿÿÿ');
+        final nlIdx = content.indexOf('\n');
+
+        int endIdx;
+        int termLen;
+        if (ffIdx != -1 && (nlIdx == -1 || ffIdx < nlIdx)) {
+          endIdx = ffIdx;
+          termLen = 3;
+        } else if (nlIdx != -1) {
+          endIdx = nlIdx;
+          termLen = 1;
+        } else {
+          break; // no complete message yet — wait for more bytes
+        }
+
+        final line = content.substring(0, endIdx).trim();
         _buffer.clear();
-        _buffer.write(content.substring(nlIdx + 1));
+        _buffer.write(content.substring(endIdx + termLen));
 
         if (line.isEmpty) continue;
         log("GET : $line");

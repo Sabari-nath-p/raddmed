@@ -181,13 +181,13 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     // applied) so mis-decoded readings can be spotted against RealTerm.
     // Remove once the hex-parsing path is confirmed correct on hardware.
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('RAW: ${cmd.raw ?? "(no raw)"}  [${cmd.type.name}]'),
-          backgroundColor: Colors.red,
-          duration: const Duration(milliseconds: 800),
-        ),
-      );
+      // ScaffoldMessenger.of(context).showSnackBar(
+      //   SnackBar(
+      //     content: Text('RAW: ${cmd.raw ?? "(no raw)"}  [${cmd.type.name}]'),
+      //     backgroundColor: Colors.red,
+      //     duration: const Duration(milliseconds: 800),
+      //   ),
+      // );
     }
     if (!mounted) return;
     setState(() {
@@ -247,18 +247,21 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
               break;
             }
 
-            // ── Endovascular: footswitch starts OVEN (phase 2, pump already OFF) ──
+            // ── Endovascular: footswitch starts OVEN (phase 2, pump already
+            // OFF). 1601 was already sent when the oven was armed (button
+            // click / auto re-arm) — the footswitch report only starts the
+            // local timer/UI, no command is sent here. ──
             if (_isEndoMode(_mode) &&
                 _awaitingFootswitch &&
                 !_isPumpOn &&
                 !_isOvenOn) {
               _awaitingFootswitch = false;
               _scheduleLog(
-                'Footswitch pressed — starting oven.',
+                'Footswitch pressed — starting oven (local only, 1601 already sent).',
                 level: 'success',
               );
               WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) _startOven();
+                if (mounted) _startOven(sendCommand: false);
               });
               break;
             }
@@ -266,14 +269,16 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
             // ── Footswitch mode, and Endovorus cyclic restarts: footswitch
             // starts OVEN while the pump is left running (e.g. Endovorus
             // cycle 2+, re-armed after the previous cycle's timer ended
-            // without forcing the pump off) ──
+            // without forcing the pump off). This automatic re-arm had no
+            // button click to send 1601 from (timer-end sends 2101 only),
+            // so THIS footswitch press sends 1601 itself. ──
             if ((_isFootswitchMode(_mode) || _isEndoMode(_mode)) &&
                 _isPumpOn &&
                 !_isOvenOn &&
                 _awaitingFootswitch) {
               _awaitingFootswitch = false;
               _scheduleLog(
-                'Footswitch pressed — starting oven.',
+                'Footswitch pressed — starting oven (sending 1601).',
                 level: 'success',
               );
               WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -314,27 +319,21 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
               break;
             }
 
-            // ── Endovascular: pedal release turns PUMP OFF, re-arming it
-            // so the next press turns it back on (dead-man switch). Only
-            // applies while the oven isn't running — i.e. still in the
-            // pump-hold phase (phase 1) — so it never fires as a side
-            // effect of pausing the oven mid-ablation. ──
+            // ── Endovascular: pedal release re-arms the pump wait so the
+            // next press turns it back on (dead-man switch). Only applies
+            // while the oven isn't running — i.e. still in the pump-hold
+            // phase (phase 1) — so it never fires as a side effect of
+            // pausing the oven mid-ablation. No serial command is sent on
+            // release — only the motor-ON flow-rate command is ever sent,
+            // and only for a real footswitch button-ON press. ──
             if (_isEndoMode(_mode) && _isPumpOn && !_isOvenOn) {
               _isPumpOn = false;
               _pumpOnAt = null;
               _pumpWaiting = true;
               _scheduleLog(
-                'Footswitch released — Pump turning OFF.',
+                'Footswitch released — Pump turning OFF (no command sent).',
                 level: 'warning',
               );
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (!mounted) return;
-                _serial.sendPumpFlowRate(0);
-                _log(
-                  'PUMP OFF (footswitch released) — sent Flow Rate 0 L/min',
-                  level: 'info',
-                );
-              });
             }
           }
           break;
@@ -514,10 +513,12 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
 
   // ── Oven control ───────────────────────────────────────────────────────────
   // Continuous:   oven requires pump ON → starts immediately.
-  // Footswitch:   click oven → arm (no serial command sent yet) → real
-  //               footswitch press (tm0.en=1) → oven ON command sent.
-  // Endovascular: pump must be OFF; click oven → arm (no serial command
-  //               sent yet) → real footswitch press → oven ON command sent.
+  // Footswitch:   click oven → arm AND send 1601 immediately. The real
+  //               footswitch press (tm0.en=1) only starts the local
+  //               timer/UI — no command is sent for it; the device is
+  //               already armed and its own pedal wiring fires the oven.
+  // Endovascular: pump must be OFF; click oven → arm AND send 1601
+  //               immediately, same as Footswitch mode above.
   void _toggleOven() {
     // ── Footswitch mode ──
     if (_isFootswitchMode(_mode)) {
@@ -533,12 +534,12 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
         return;
       }
       if (!_isPumpOn) return;
-      // Arm only — do NOT send the oven ON command here. It is only ever
-      // sent from _startOven(), which runs when the real footswitch press
-      // (tm0.en=1) arrives in _onSerialData.
+      // Arm AND send the oven ON (1601) command right here, at the button
+      // click — not when the footswitch signal arrives.
       setState(() => _awaitingFootswitch = true);
+      _serial.sendOvenFootswitch(true);
       _log(
-        'Footswitch mode: oven armed — waiting for footswitch signal…',
+        'Footswitch mode: oven armed — sent 1601 — waiting for footswitch signal…',
         level: 'warning',
       );
       return;
@@ -558,12 +559,12 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
         _log('Oven footswitch wait cancelled.', level: 'info');
         return;
       }
-      // Arm only — do NOT send the oven ON command here. It is only ever
-      // sent from _startOven(), which runs when the real footswitch press
-      // (tm0.en=1) arrives in _onSerialData.
+      // Arm AND send the oven ON (1601) command right here, at the button
+      // click — not when the footswitch signal arrives.
       setState(() => _awaitingFootswitch = true);
+      _serial.sendOvenFootswitch(true);
       _log(
-        'Endovascular: oven armed — waiting for footswitch signal…',
+        'Endovascular: oven armed — sent 1601 — waiting for footswitch signal…',
         level: 'warning',
       );
       return;
@@ -573,7 +574,16 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     _isOvenOn ? _stopOven() : _startOven();
   }
 
-  void _startOven() {
+  /// Starts the oven locally (timer/UI state). [sendCommand] controls
+  /// whether the oven-ON serial command is sent:
+  ///  - Continuous mode: always sends 1501 here (there is no separate arm
+  ///    step — the button click IS the start).
+  ///  - Footswitch / Endovorus modes: the command (1601) was already sent
+  ///    at arm time (button click, or automatic cyclic re-arm), so the
+  ///    footswitch-press handler calls this with sendCommand=false — the
+  ///    footswitch report only starts the local countdown, it never
+  ///    triggers a serial command itself.
+  void _startOven({bool sendCommand = true}) {
     final initSecs = _mode == 'Continuous' ? _timerMinutes * 60 : _timerSeconds;
     setState(() {
       _isOvenOn = true;
@@ -587,11 +597,12 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     });
     _ovenOnAt = DateTime.now();
 
-    // Send oven ON command via serial
-    if (_mode == 'Continuous') {
-      _serial.sendOvenContinuous(true);
-    } else {
-      _serial.sendOvenFootswitch(true);
+    if (sendCommand) {
+      if (_mode == 'Continuous') {
+        _serial.sendOvenContinuous(true);
+      } else {
+        _serial.sendOvenFootswitch(true);
+      }
     }
     _log('OVEN ON — Power: $_powerWatts W | Mode: $_mode', level: 'warning');
 
@@ -635,28 +646,27 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
             if (_isFootswitchMode(_mode)) {
               // Footswitch mode is cyclic: the pump was never switched
               // off by a footswitch signal, so it stays ON between
-              // cycles. Only the oven OFF command is sent here — the ON
-              // command for the next cycle must NOT be sent automatically;
-              // it only goes out once the real footswitch press arrives
-              // (see _startOven(), called from the footswitch handler).
-              _serial.sendOvenFootswitch(false);
+              // cycles. Timer end sends 2101 ONLY — no 1601 here. The
+              // next footswitch press sends 1601 itself (see the cyclic
+              // restart branch in _onSerialData), since no button click
+              // happens for this automatic re-arm.
+              _serial.sendOvenFootswitchTimerEnd();
               _awaitingFootswitch = true;
               _scheduleLog(
-                'Cycle complete — Oven OFF (Pump still ON) — armed for next footswitch press.',
+                'Cycle complete — Timer end (2101) sent (Pump still ON) — armed for next footswitch press.',
                 level: 'warning',
               );
             } else if (_isEndoMode(_mode)) {
               // Endovorus mode: same cyclic pattern as Footswitch mode —
-              // timer end turns OFF the oven ONLY and re-arms it, waiting
-              // for the next footswitch press to start the next cycle
-              // directly. The pump's on/off state is left exactly as it
-              // was (still running if it was running) — not forced off
-              // and not re-armed to the pump-wait phase; the pump keeps
-              // being driven solely by its own footswitch press/release.
-              _serial.sendOvenFootswitch(false);
+              // timer end sends 2101 ONLY, no 1601 here. The pump's on/off
+              // state is left exactly as it was (still running if it was
+              // running) — not forced off and not re-armed to the
+              // pump-wait phase; the pump keeps being driven solely by its
+              // own footswitch press/release.
+              _serial.sendOvenFootswitchTimerEnd();
               _awaitingFootswitch = true;
               _scheduleLog(
-                'Cycle complete — Oven OFF (Pump left running if it was on) — armed for next footswitch press.',
+                'Cycle complete — Timer end (2101) sent (Pump left running if it was on) — armed for next footswitch press.',
                 level: 'warning',
               );
             } else {
@@ -738,17 +748,20 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
   void _pauseOvenFromFootswitch() {
     if (!_isOvenOn || _isPaused) return;
     _ovenTimer?.cancel();
-    _serial.sendOvenFootswitch(false);
+    // No serial command sent on release — 1601 is only ever sent for a
+    // real button-ON press, never for a footswitch release.
     setState(() => _isPaused = true);
     _log(
-      'OVEN PAUSED (footswitch released) — Elapsed: ${_fmt(_elapsedSeconds)}  Remaining: ${_fmt(_remainingSeconds)}',
+      'OVEN PAUSED (footswitch released, no command sent) — Elapsed: ${_fmt(_elapsedSeconds)}  Remaining: ${_fmt(_remainingSeconds)}',
       level: 'warning',
     );
   }
 
   void _resumeOvenFromFootswitch() {
     if (!_isOvenOn || !_isPaused) return;
-    _serial.sendOvenFootswitch(true);
+    // No serial command sent here either — 1601 was already sent when the
+    // oven was armed; a footswitch press never sends a command, it only
+    // resumes the local timer/UI.
     setState(() => _isPaused = false);
     _log(
       'OVEN RESUMED (footswitch pressed) — Remaining: ${_fmt(_remainingSeconds)}',
