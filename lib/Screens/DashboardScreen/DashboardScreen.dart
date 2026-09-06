@@ -114,6 +114,7 @@ class _SystemStatusCardState extends State<_SystemStatusCard> {
         _error = null;
       });
       final ok = _serial.connect(_selectedPort!);
+      if (ok) _serial.sendSync();
       setState(() {
         _connecting = false;
         if (!ok) _error = 'Connection failed';
@@ -708,6 +709,7 @@ class _InfusionDialogState extends State<_InfusionDialog> {
     if (_isRunning) {
       _serial.sendPump(false);
     }
+    _serial.sendSync();
     _repeatTimer?.cancel();
     Navigator.of(context).pop();
   }

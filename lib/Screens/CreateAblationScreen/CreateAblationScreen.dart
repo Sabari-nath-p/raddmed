@@ -10,6 +10,7 @@ import 'package:raddmed/Models/ProcedureModel.dart';
 import 'package:raddmed/Repositories/ProcedureRepository.dart';
 import 'package:raddmed/Models/UserModel.dart';
 import 'package:raddmed/Widgets/UnifiedHeader.dart';
+import 'package:raddmed/Services/SerialService.dart';
 
 // --- Main Screen ---
 class NewProcedureScreen extends StatefulWidget {
@@ -38,6 +39,7 @@ class _NewProcedureScreenState extends State<NewProcedureScreen> {
   void initState() {
     super.initState();
     _loadPatients();
+    SerialService.instance.sendSync();
   }
 
   void _loadPatients() {

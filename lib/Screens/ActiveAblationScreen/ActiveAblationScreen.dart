@@ -152,6 +152,8 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     //   1100 → Continuous mode
     //   1101 → Footswitch or Endovascular mode
 
+    _serial.sendSync();
+
     final isFootOrEndo = _isFootswitchMode(_mode) || _isEndoMode(_mode);
     _serial.sendActivation(isFootOrEndo);
     _log(
@@ -815,6 +817,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
       _edgeTempSet = false;
       _isPaused = false;
     });
+    _serial.sendSync();
     _log('Procedure ended by user.', level: 'warning');
 
     if (widget.procedure != null) {

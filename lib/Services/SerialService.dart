@@ -25,6 +25,7 @@ import 'package:flutter_libserialport/flutter_libserialport.dart';
 /// | 17   | `17{VAL}\n`  | Set pump flow rate (Endovorus)       |
 /// | 18   | `18{VAL}\n`  | Set infusion flow rate               |
 /// | 21   | `2101\n`     | Timer/cycle end (Footswitch/Endovorus) |
+/// | 04   | `04\n`       | Device sync/reset — sent on port connect, on opening the Create Ablation and Active Ablation screens, on ending the procedure, and on closing Infusion Mode |
 ///
 /// ### Incoming (Device → App)
 /// Current (Nextion-style) format — plain decimal values, no scaling.
@@ -243,6 +244,11 @@ class SerialService {
   }
 
   // ── Convenience Senders ────────────────────────────────────────────────────
+
+  /// Send `04` — device sync/reset command. Sent on: port connect, Create
+  /// Ablation screen open, Active Ablation screen open, end of procedure,
+  /// and Infusion Mode close.
+  bool sendSync() => send('04');
 
   /// Send `11` — start procedure
   bool sendStartProcedure() => send('11');
