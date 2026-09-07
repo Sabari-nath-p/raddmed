@@ -152,7 +152,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
     //   1100 → Continuous mode
     //   1101 → Footswitch or Endovascular mode
 
-    _serial.sendSync();
+    //  _serial.sendSync();
 
     final isFootOrEndo = _isFootswitchMode(_mode) || _isEndoMode(_mode);
     _serial.sendActivation(isFootOrEndo);
