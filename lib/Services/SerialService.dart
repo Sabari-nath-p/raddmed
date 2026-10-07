@@ -236,11 +236,23 @@ class SerialService {
     if (_port == null || !_port!.isOpen) return false;
     try {
       //final bytes = Uint8List.fromList();
-      _port!.write(newcomd);
+      if (cmd == "04") {
+        retryTrigger(newcomd);
+      } else {
+        _port!.write(newcomd);
+      }
       return true;
     } catch (_) {
       return false;
     }
+  }
+
+  retryTrigger(var newcomd) async {
+    _port!.write(newcomd);
+    await Future.delayed(Duration(seconds: 1));
+    _port!.write(newcomd);
+    await Future.delayed(Duration(seconds: 1));
+    _port!.write(newcomd);
   }
 
   // ── Convenience Senders ────────────────────────────────────────────────────
