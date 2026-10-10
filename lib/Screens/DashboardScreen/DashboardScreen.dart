@@ -709,7 +709,7 @@ class _InfusionDialogState extends State<_InfusionDialog> {
     if (_isRunning) {
       _serial.sendPump(false);
     }
-    _serial.sendSync();
+    _serial.sendSyncWithReconnect();
     _repeatTimer?.cancel();
     Navigator.of(context).pop();
   }

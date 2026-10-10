@@ -25,7 +25,7 @@ import 'package:flutter_libserialport/flutter_libserialport.dart';
 /// | 17   | `17{VAL}\n`  | Set pump flow rate (Endovorus)       |
 /// | 18   | `18{VAL}\n`  | Set infusion flow rate               |
 /// | 21   | `2101\n`     | Timer/cycle end (Footswitch/Endovorus) |
-/// | 04   | `04\n`       | Device sync/reset — sent on port connect, on opening the Create Ablation and Active Ablation screens, on ending the procedure, and on closing Infusion Mode |
+/// | 04   | `04\n`       | Device sync/reset — sent on port connect, on opening the Create Ablation and Active Ablation screens, on ending the procedure, and on closing Infusion Mode. For the latter two, the port is disconnected and reconnected immediately before sending (see `sendSyncWithReconnect`) |
 ///
 /// ### Incoming (Device → App)
 /// Current (Nextion-style) format — plain decimal values, no scaling.
@@ -236,23 +236,11 @@ class SerialService {
     if (_port == null || !_port!.isOpen) return false;
     try {
       //final bytes = Uint8List.fromList();
-      if (cmd == "04") {
-        retryTrigger(newcomd);
-      } else {
-        _port!.write(newcomd);
-      }
+      _port!.write(newcomd);
       return true;
     } catch (_) {
       return false;
     }
-  }
-
-  retryTrigger(var newcomd) async {
-    _port!.write(newcomd);
-    await Future.delayed(Duration(seconds: 1));
-    _port!.write(newcomd);
-    await Future.delayed(Duration(seconds: 1));
-    _port!.write(newcomd);
   }
 
   // ── Convenience Senders ────────────────────────────────────────────────────
@@ -261,6 +249,18 @@ class SerialService {
   /// Ablation screen open, Active Ablation screen open, end of procedure,
   /// and Infusion Mode close.
   bool sendSync() => send('04');
+
+  /// Send `04`, but first cycle the port: disconnect and reconnect to the
+  /// same port before sending. Used when closing Infusion Mode or ending a
+  /// procedure, where the device needs the connection reset before it will
+  /// accept the sync command.
+  bool sendSyncWithReconnect() {
+    final portName = _connectedPortName;
+    if (portName == null) return sendSync();
+    disconnect();
+    if (!connect(portName)) return false;
+    return sendSync();
+  }
 
   /// Send `11` — start procedure
   bool sendStartProcedure() => send('11');

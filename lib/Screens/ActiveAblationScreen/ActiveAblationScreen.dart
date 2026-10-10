@@ -817,7 +817,7 @@ class _ActiveAblationScreenState extends State<ActiveAblationScreen>
       _edgeTempSet = false;
       _isPaused = false;
     });
-    _serial.sendSync();
+    _serial.sendSyncWithReconnect();
     _log('Procedure ended by user.', level: 'warning');
 
     if (widget.procedure != null) {
