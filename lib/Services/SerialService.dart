@@ -254,12 +254,25 @@ class SerialService {
   /// same port before sending. Used when closing Infusion Mode or ending a
   /// procedure, where the device needs the connection reset before it will
   /// accept the sync command.
-  bool sendSyncWithReconnect() {
+  ///
+  /// `connect()` always closes any existing connection before opening, but
+  /// on Windows the OS/driver doesn't release the COM port handle the
+  /// instant it's closed — reopening right away can fail with "Access is
+  /// denied" (SP_ERR_FAIL, error 5). Retry the open a few times with a
+  /// short delay so the handle has time to be released.
+  Future<bool> sendSyncWithReconnect() async {
     final portName = _connectedPortName;
     if (portName == null) return sendSync();
+
     disconnect();
-    if (!connect(portName)) return false;
-    return sendSync();
+    await Future.delayed(Duration(seconds: 1));
+    const maxAttempts = 5;
+    const retryDelay = Duration(milliseconds: 800);
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (connect(portName)) return sendSync();
+      if (attempt < maxAttempts) await Future.delayed(retryDelay);
+    }
+    return false;
   }
 
   /// Send `11` — start procedure
